@@ -15,6 +15,9 @@ from Triceratops_IK import InverseKinematics
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
+import sys, os
+sys.path.append(os.path.expanduser("~/UnityRos2_ws/src/unity_robotics_demo_msgs"))
+from unity_robotics_demo_msgs.msg import JointState
 
 from math import pi
 import threading
@@ -58,6 +61,32 @@ class CmdVelSubscriber(Node):
         self.angular_y = msg.angular.y
         self.angular_z = msg.angular.z
 
+class JointStatesSubscriber(Node):
+    def __init__(self):
+        super().__init__('joint_states_subscriber')
+        self.subscription = self.create_subscription(
+            JointState,
+            '/joint_states',
+            self.listener_callback,
+            10
+        )
+
+        self.joint_names = []
+        self.foot_endpoints = np.zeros([3, 4])
+        self.lumbar_angles = np.zeros(2)
+
+        self.get_logger().info('JointStates Subscriber has been started')
+
+    def listener_callback(self, msg: JointState):
+        self.joint_names = msg.name
+        self.foot_endpoints[:3, :] = [np.array(msg.z[:4]), np.array(msg.x[:4]), np.array(msg.y[:4])]
+        self.foot_endpoints[0, :] += [0.09067, 0.09067, -0.09067, -0.09067]
+        self.foot_endpoints[1, :] += [-0.085, 0.085, -0.085, 0.085]
+        self.foot_endpoints[2, :] += [0.0, 0.0, 0.01, 0.01]
+        if msg.z[4] > 180:
+            msg.z[4] -= 360
+        self.lumbar_angles = np.array([msg.z[4], -(msg.y[4]-90)])
+
 class RobotState:
     def __init__(self):
         self.config = RobotConfiguration()
@@ -76,8 +105,10 @@ class Command:
 class RobotControl:
     def __init__(self):
         self.cmd_vel = CmdVelSubscriber()
+        self.joint_states = JointStatesSubscriber()
         self.executor = rclpy.executors.SingleThreadedExecutor()
         self.executor.add_node(self.cmd_vel)
+        self.executor.add_node(self.joint_states)
 
         self.spin_thread = threading.Thread(target=self.executor.spin, daemon=True)
         self.spin_thread.start()
@@ -132,19 +163,22 @@ class RobotControl:
 
             self.state.joint_angles = self.inverse_kinematics.four_legs_inverse_kinematics(
                 self.state.foot_locations
+                # self.joint_states.foot_endpoints
             )
 
             # Wait for foot placements to be ready
-            self.state.foot_locations, _ = future_foot_locations.result()
-
+            self.state.foot_locations, self.contact_modes = future_foot_locations.result()
+            print(self.joint_states.foot_endpoints)
+            print(self.state.foot_locations)
             goal = (
                 self.state.joint_angles * 180 / 3.14 * DEGREE_TO_SERVO
                 + self.config.leg_center_position
             )
 
+            lumbar_pos = self.joint_states.lumbar_angles * DEGREE_TO_SERVO
             # Only update motor positions if the goal has significantly changed
             if np.linalg.norm(goal - self.state.last_goal) > self.config.goal_change_threshold:
-                self.control_cmd.motor_position_control(goal)
+                self.control_cmd.motor_position_control(goal, lumbar_pos)
                 self.state.last_goal = goal
 
             self.state.ticks += 1    
@@ -166,9 +200,10 @@ class ControlCmd:
         motor_names = ['FR_higher', 'FR_lower', 'FR_hip',  
                         'FL_higher', 'FL_lower', 'FL_hip',
                        'RR_higher', 'RR_lower', 'RR_hip',
-                       'RL_higher', 'RL_lower', 'RL_hip']
+                       'RL_higher', 'RL_lower', 'RL_hip',
+                       'lumbar_y', 'lumbar_z']
 
-        self.motor_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        self.motor_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
         self.motors = {name: self.dynamixel.createMotor(name, motor_number=id_) 
                     for name, id_ in zip(motor_names, self.motor_ids)}
 
@@ -213,7 +248,7 @@ class ControlCmd:
     def reset_to_original(self, position=None):
         self.motor_position_control()
 
-    def motor_position_control(self, position=None):
+    def motor_position_control(self, position=None, lumbar_pos=None):
         if position is None:
             position = [[2048 ,2048, 2048, 2048],
                         [1992, 2047, 2092, 2099],
@@ -222,7 +257,11 @@ class ControlCmd:
         for i, motor_list in enumerate(self.leg_motor_list):
             for j, motor in enumerate(motor_list):
                 motor.writePosition(int(position[i][j]))
-
+        
+        # lock lumbar
+        self.motors['lumbar_y'].writePosition(int(2048+lumbar_pos[0]))
+        self.motors['lumbar_z'].writePosition(int(2048+lumbar_pos[1]))
+        print('lumbar_pos', lumbar_pos)
         self.dynamixel.sentAllCmd()
 
 def main():
@@ -243,6 +282,7 @@ def main():
             elif cmd == "exit":
                 break
         except Exception as e:
+            robot_control.cleanup()
             traceback.print_exc()
             break
 

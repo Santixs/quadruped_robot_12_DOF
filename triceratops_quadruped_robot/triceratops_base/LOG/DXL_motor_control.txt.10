@@ -1,3 +1,0 @@
-[2025-02-14 13:05:47,226] [DXL_Communication .DXL_motor_3] [ERROR]: rebootMotor : ID:3 reboot Error: [TxRxResult] There is no status packet!
-[2025-02-14 13:05:47,228] [DXL_Communication .DXL_motor_3] [INFO]: rebootMotor : [ID:3] reboot Succeeded
-[2025-02-14 13:05:48,772] [DXL_Communication .DXL_motor_3] [INFO]: enableMotor : Motor3 is successfully armed

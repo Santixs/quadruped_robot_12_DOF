@@ -11,6 +11,7 @@ from Swing_controller import SwingController
 from Stance_controller import StanceController
 
 from Triceratops_IK import InverseKinematics
+from Triceratops_FK import ForwardKinematics
 
 import rclpy
 from rclpy.node import Node
@@ -61,6 +62,18 @@ class CmdVelSubscriber(Node):
         self.angular_y = msg.angular.y
         self.angular_z = msg.angular.z
 
+
+class JointStatesPublisher(Node):
+    def __init__(self):
+        super().__init__('joint_states_publisher')
+        self.publisher_ = self.create_publisher(JointState, 'joint_states', 10)
+
+        # self.joint_names = []
+        # self.foot_endpoints = np.zeros([3, 4])
+        # self.lumbar_angles = np.zeros(2)
+
+        self.get_logger().info('JointStates Publisher has been started')
+
 class JointStatesSubscriber(Node):
     def __init__(self):
         super().__init__('joint_states_subscriber')
@@ -70,6 +83,7 @@ class JointStatesSubscriber(Node):
             self.listener_callback,
             10
         )
+        self.publisher_ = self.create_publisher(JointState, 'joint_states', 10)
 
         self.joint_names = []
         self.foot_endpoints = np.zeros([3, 4])
@@ -118,6 +132,7 @@ class RobotControl:
         self.swing_controller = SwingController(self.config)
         self.stance_controller = StanceController(self.config)
         self.inverse_kinematics = InverseKinematics(self.config)
+        self.forward_kinematics = ForwardKinematics(self.config)
 
         self.state = RobotState()
         self.command = Command()
@@ -154,6 +169,7 @@ class RobotControl:
         return new_foot_locations, contact_modes
 
     def puppy_move(self):
+        self.control_cmd.enable_all_motor()
         while True:
             self.get_vel_data()
 
@@ -180,8 +196,37 @@ class RobotControl:
             if np.linalg.norm(goal - self.state.last_goal) > self.config.goal_change_threshold:
                 self.control_cmd.motor_position_control(goal, lumbar_pos)
                 self.state.last_goal = goal
+            self.state.ticks += 1
+            
+    def puppy_move_unitiy(self):
+        self.control_cmd.enable_all_motor()
+        while True:
+            self.get_vel_data()
 
-            self.state.ticks += 1    
+            # Asynchronously calculate foot placements
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future_foot_locations = executor.submit(self.step_gait, self.state, self.command)
+
+            self.state.joint_angles = self.inverse_kinematics.four_legs_inverse_kinematics(
+                # self.state.foot_locations
+                self.joint_states.foot_endpoints
+            )
+
+            # Wait for foot placements to be ready
+            self.state.foot_locations, self.contact_modes = future_foot_locations.result()
+            print(self.joint_states.foot_endpoints)
+            # print(self.state.foot_locations)
+            goal = (
+                self.state.joint_angles * 180 / 3.14 * DEGREE_TO_SERVO
+                + self.config.leg_center_position
+            )
+
+            lumbar_pos = self.joint_states.lumbar_angles * DEGREE_TO_SERVO
+            # Only update motor positions if the goal has significantly changed
+            if np.linalg.norm(goal - self.state.last_goal) > self.config.goal_change_threshold:
+                self.control_cmd.motor_position_control(goal, lumbar_pos)
+                self.state.last_goal = goal
+            self.state.ticks += 1
 
 class ControlCmd:
     """Low-level control of Dynamixel motors."""
@@ -189,6 +234,9 @@ class ControlCmd:
         self.setup_dynamixel()
         self.setup_motors()
         self.initialize_motor_states()
+        self.config = RobotConfiguration()
+        self.forward_kinematics = ForwardKinematics(self.config)
+        self.JointStatesPublisher = JointStatesPublisher()
         self.walking_freq = 2000  # 2000Hz
 
     def setup_dynamixel(self):
@@ -216,7 +264,7 @@ class ControlCmd:
     def initialize_motor_states(self):
         self.dynamixel.rebootAllMotor()
         self.dynamixel.updateMotorData()
-        self.enable_all_motor()
+        # self.enable_all_motor()
         self.joint_position = np.zeros(12)
 
     def __del__(self):
@@ -264,12 +312,73 @@ class ControlCmd:
         print('lumbar_pos', lumbar_pos)
         self.dynamixel.sentAllCmd()
 
+    def unity_mirror(self):
+        position = np.zeros(3)
+        while True:
+            position1, _, _ = self.dynamixel.packet_handler.read4ByteTxRx(self.dynamixel.port_handler, 1, 132)
+            position2, _, _ = self.dynamixel.packet_handler.read4ByteTxRx(self.dynamixel.port_handler, 2, 132)
+            position3, _, _ = self.dynamixel.packet_handler.read4ByteTxRx(self.dynamixel.port_handler, 3, 132)
+            # self.dynamixel.updateMotorData()
+            # fr_hip_position = self.motors['FR_hip'].PRESENT_POSITION_value*(1/DEGREE_TO_SERVO)
+            # fr_higher_position = self.motors['FR_higher'].PRESENT_POSITION_value*(1/DEGREE_TO_SERVO)
+            # fr_lower_position = self.motors['FR_lower'].PRESENT_POSITION_value*(1/DEGREE_TO_SERVO)
+            fr_hip_position = position3*(1/DEGREE_TO_SERVO)
+            fr_higher_position = position2*(1/DEGREE_TO_SERVO)
+            fr_lower_position = position1*(1/DEGREE_TO_SERVO)
+            # print(fr_hip_position, fr_higher_position, fr_lower_position)
+            # print(self.joint_position[0])
+            # print(fr_higher_position)
+            # self.leg1 = self.joint_position[0]*(1/DEGREE_TO_SERVO)
+            self.leg_angles = np.array(0)
+            self.leg_angles = [fr_higher_position, 
+                               self.forward_kinematics.leg_explicit_forward_kinematics(fr_lower_position, fr_higher_position,0),
+                               fr_hip_position]
+            
+            print('legs', self.leg_angles)
+            joint_state_msg = JointState()
+            joint_state_msg.name = [
+                'FR_higher'
+            ]
+            joint_state_msg.x = [float(self.leg_angles[0])]
+            joint_state_msg.y = [float(self.leg_angles[1])]
+            joint_state_msg.z = [0.0]
+            self.JointStatesPublisher.publisher_.publish(joint_state_msg)
+
+    def unity_mirror_2(self):
+        position = np.zeros(14)
+        while True:
+            for i in range(14):
+                position[i], _, _ = self.dynamixel.packet_handler.read4ByteTxRx(self.dynamixel.port_handler, i+1, 132)
+            # print('position', position)
+            motor_angles = position/DEGREE_TO_SERVO-180
+            self.leg_angles = np.zeros([3, 4])
+            # print('motors', motor_angles)
+            for i in range(4):
+                self.leg_angles[:, i] = self.forward_kinematics.leg_explicit_forward_kinematics_2(motor_angles[3*i], motor_angles[3*i+1], motor_angles[3*i+2], i)
+            print('legs', self.leg_angles)
+            joint_state_msg = JointState()
+            joint_state_msg.name = [
+                'FR', 'FL', 'RR', 'RL', 'LUMBAR'
+            ]
+            joint_state_msg.x = self.leg_angles[0, :].tolist()  # First row (all columns)
+            joint_state_msg.y = self.leg_angles[1, :].tolist()  # Second row (all columns)
+            joint_state_msg.z = self.leg_angles[2, :].tolist()  # Third row (all columns)
+            joint_state_msg.x.append(0.0)  # Lumbar X
+            joint_state_msg.y.append(motor_angles[12])  # Lumbar Y
+            joint_state_msg.z.append(motor_angles[13])  # Lumbar Z
+            self.JointStatesPublisher.publisher_.publish(joint_state_msg)
+
+
+
 def main():
     rclpy.init()
     robot_control = RobotControl()
+    control_cmd = ControlCmd()
 
     command_dict = {
         "s":robot_control.puppy_move,
+        "u":robot_control.puppy_move_unitiy,
+        "r":control_cmd.unity_mirror_2
     }
 
     atexit.register(robot_control.cleanup)

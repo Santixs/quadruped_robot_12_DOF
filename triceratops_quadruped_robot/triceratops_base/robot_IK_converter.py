@@ -32,7 +32,8 @@ def inverse_transform_angles(gamma, alpha, beta, leg_type):
         raise ValueError(f"Unknown leg type: {leg_type}")
 
 def inverse_kinematics(x, y, z):
-    h = 0.0365
+    # h = 0.0365
+    h = 0.0375
     d = (y ** 2 + z ** 2) ** 0.5
     l = (d ** 2 - h ** 2) ** 0.5
     gamma1 = - np.arctan(h / l)
@@ -40,8 +41,10 @@ def inverse_kinematics(x, y, z):
     gamma = gamma2 - gamma1
 
     s = (l ** 2 + x ** 2) ** 0.5
-    hu = 0.065
-    hl = 0.065
+    # hu = 0.065
+    # hl = 0.065
+    hu = 0.13
+    hl = 0.13
     n = (s ** 2 - hl ** 2 - hu ** 2) / (2 * hu)
     beta = -np.arccos(n / hl)
 
@@ -62,8 +65,9 @@ class JointStateRecorder(Node):
             self.joint_callback,
             10)
         
-        # Initialize storage for frames
+        # Initialize storage for frames and timestamps
         self.frames = []
+        self.timestamps = []
         self.recording = True
         self.first_frame = None
         self.min_frames = 20  # Minimum number of frames before checking for repetition
@@ -112,16 +116,20 @@ class JointStateRecorder(Node):
         if not self.frames:
             return
         
-        # Convert frames to numpy array
+        # Convert frames to numpy array and include timestamps
         frames_array = np.array(self.frames)
+        timestamps_array = np.array(self.timestamps).reshape(-1, 1)
+        
+        # Combine frames and timestamps
+        output_array = np.hstack((frames_array, timestamps_array))
         
         # Save to text file
         np.savetxt(
             self.output_file, 
-            frames_array,
+            output_array,
             fmt='%.6f',
-            header=f'Joint angles matrix: {frames_array.shape[0]} frames, 12 joints per frame\n'
-                  'Order: fr[gamma,alpha,beta] fl[gamma,alpha,beta] hr[gamma,alpha,beta] hl[gamma,alpha,beta]'
+            header=f'Joint angles matrix: {frames_array.shape[0]} frames, 12 joints per frame + timestamp\n'
+                  'Order: fr[gamma,alpha,beta] fl[gamma,alpha,beta] hr[gamma,alpha,beta] hl[gamma,alpha,beta] timestamp'
         )
         
         self.get_logger().info(f'Saved {len(self.frames)} frames to {self.output_file}')
@@ -134,13 +142,15 @@ class JointStateRecorder(Node):
             
             # Process current frame
             current_frame = self.process_frame(msg)
+            current_time = self.get_clock().now().nanoseconds / 1e9  # Convert to seconds
             
             # Store first frame for comparison
             if self.first_frame is None:
                 self.first_frame = current_frame
             
-            # Store frame
+            # Store frame and timestamp
             self.frames.append(current_frame)
+            self.timestamps.append(current_time)
             
             # Check for pattern completion
             if self.detect_pattern_completion(current_frame):

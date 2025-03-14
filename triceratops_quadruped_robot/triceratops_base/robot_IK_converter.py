@@ -65,16 +65,26 @@ class JointStateRecorder(Node):
             self.joint_callback,
             10)
         
-        # Initialize storage for frames and timestamps
+        # Initialize storage for frames, endpoints, and timestamps
         self.frames = []
+        self.endpoints = []
         self.timestamps = []
         self.recording = True
         self.first_frame = None
         self.min_frames = 20  # Minimum number of frames before checking for repetition
         
-        # Generate timestamp for filename
+        # Store leg origin bias values
+        self.leg_origins = {
+            'fr': (0.128, -0.055, 0),
+            'fl': (0.128, 0.055, 0),
+            'hr': (-0.128, -0.055, 0),
+            'hl': (-0.128, 0.055, 0)
+        }
+        
+        # Generate timestamp for filenames
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.output_file = f'joint_angles_{timestamp}.txt'
+        self.angles_file = f'joint_angles_{timestamp}.txt'
+        self.endpoints_file = f'leg_endpoints_{timestamp}.txt'
         
         self.get_logger().info('Joint State Recorder has been started')
 
@@ -89,15 +99,22 @@ class JointStateRecorder(Node):
         return np.all(np.abs(current_frame - self.first_frame) < threshold)
 
     def process_frame(self, msg):
-        """Process a single frame of joint states into angles."""
+        """Process a single frame of joint states into angles and endpoints."""
         leg_order = ['fr', 'fl', 'hr', 'hl']
         frame_angles = []
+        frame_endpoints = []
         
         # Process each leg
         for i, leg in enumerate(leg_order):
+            # Get raw coordinates from message
             y, z, x = msg.x[i], msg.y[i], msg.z[i]
             
-            # Transform coordinates
+            # Store the original endpoint coordinates with origin bias
+            origin_x, origin_y, origin_z = self.leg_origins[leg]
+            endpoint = [x + origin_x, y + origin_y, z + origin_z]
+            frame_endpoints.extend(endpoint)
+            
+            # Transform coordinates for inverse kinematics
             x_fr, y_fr, z_fr = transform_to_fr(x, y, z, leg)
             
             # Calculate angles
@@ -106,56 +123,66 @@ class JointStateRecorder(Node):
             # Transform angles back
             gamma, alpha, beta = inverse_transform_angles(gamma, alpha, beta, leg)
             
-            # Add to frame angles in order
+            # Add to frame angles
             frame_angles.extend([gamma, alpha, beta])
         
-        return np.array(frame_angles)
+        return np.array(frame_angles), np.array(frame_endpoints)
 
-    def save_frames(self):
-        """Save recorded frames to file."""
+    def save_data(self):
+        """Save recorded frames and endpoints to files."""
         if not self.frames:
             return
         
-        # Convert frames to numpy array and include timestamps
+        # Save joint angles
         frames_array = np.array(self.frames)
         timestamps_array = np.array(self.timestamps).reshape(-1, 1)
+        angles_output = np.hstack((frames_array, timestamps_array))
         
-        # Combine frames and timestamps
-        output_array = np.hstack((frames_array, timestamps_array))
-        
-        # Save to text file
         np.savetxt(
-            self.output_file, 
-            output_array,
+            self.angles_file, 
+            angles_output,
             fmt='%.6f',
             header=f'Joint angles matrix: {frames_array.shape[0]} frames, 12 joints per frame + timestamp\n'
                   'Order: fr[gamma,alpha,beta] fl[gamma,alpha,beta] hr[gamma,alpha,beta] hl[gamma,alpha,beta] timestamp'
         )
         
-        self.get_logger().info(f'Saved {len(self.frames)} frames to {self.output_file}')
+        # Save endpoints
+        endpoints_array = np.array(self.endpoints)
+        endpoints_output = np.hstack((endpoints_array, timestamps_array))
+        
+        np.savetxt(
+            self.endpoints_file, 
+            endpoints_output,
+            fmt='%.6f',
+            header=f'Leg endpoints matrix: {endpoints_array.shape[0]} frames, 12 coordinates per frame + timestamp\n'
+                  'Order: fr[x,y,z] fl[x,y,z] hr[x,y,z] hl[x,y,z] timestamp'
+        )
+        
+        self.get_logger().info(f'Saved {len(self.frames)} frames to {self.angles_file} and {self.endpoints_file}')
 
     def joint_callback(self, msg):
-        """Process incoming joint states and record angles."""
+        """Process incoming joint states and record angles and endpoints."""
         try:
             if not self.recording:
                 return
             
             # Process current frame
-            current_frame = self.process_frame(msg)
+            current_angles, current_endpoints = self.process_frame(msg)
             current_time = self.get_clock().now().nanoseconds / 1e9  # Convert to seconds
             
             # Store first frame for comparison
             if self.first_frame is None:
-                self.first_frame = current_frame
+                self.first_frame = current_angles
             
-            # Store frame and timestamp
-            self.frames.append(current_frame)
+            # Store frame, endpoints, and timestamp
+            self.frames.append(current_angles)
+            self.endpoints.append(current_endpoints)
             self.timestamps.append(current_time)
             
             # Check for pattern completion
-            if self.detect_pattern_completion(current_frame):
+            if self.detect_pattern_completion(current_angles):
                 self.recording = False
-                self.save_frames()
+                self.save_data()
                 self.get_logger().info(f'Pattern completed after {len(self.frames)} frames')
                 return
             
@@ -174,7 +201,7 @@ def main(args=None):
     try:
         rclpy.spin(joint_recorder)
     except KeyboardInterrupt:
-        joint_recorder.save_frames()
+        joint_recorder.save_data()
     finally:
         joint_recorder.destroy_node()
         rclpy.shutdown()

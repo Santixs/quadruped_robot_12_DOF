@@ -89,6 +89,7 @@ class JointStatesSubscriber(Node):
         self.joint_names = []
         self.foot_endpoints = np.zeros([3, 4])
         self.lumbar_angles = np.zeros(2)
+        self.head_angles = np.zeros(2)
 
         self.get_logger().info('JointStates Subscriber has been started')
 
@@ -100,7 +101,10 @@ class JointStatesSubscriber(Node):
         self.foot_endpoints[2, :] += [0.0, 0.0, 0.01, 0.01]
         if msg.z[4] > 180:
             msg.z[4] -= 360
+        if msg.z[5] > 180:
+            msg.z[5] -= 360
         self.lumbar_angles = np.array([msg.z[4], -(msg.y[4]-90)])
+        self.head_angles = np.array([-msg.z[5]+30, msg.z[6]])
 
 class SwitchModeService(Node):
 
@@ -202,7 +206,6 @@ class RobotControl:
         """Main mode handler that manages thread creation and termination"""
         while True:
             new_mode = self.switch_mode_service.mode
-            print(self.current_mode)
             # If mode has changed
             if new_mode != self.current_mode:
                 print(f"Switching from {self.current_mode} to {new_mode}")
@@ -269,17 +272,17 @@ class RobotControl:
 
             # Wait for foot placements to be ready
             self.state.foot_locations, self.contact_modes = future_foot_locations.result()
-            print(self.joint_states.foot_endpoints)
-            print(self.state.foot_locations)
             goal = (
                 self.state.joint_angles * 180 / 3.14 * DEGREE_TO_SERVO
                 + self.config.leg_center_position
             )
 
-            lumbar_pos = self.joint_states.lumbar_angles * DEGREE_TO_SERVO
+            lumbar_pos = np.zeros(2)
+            head_pos = np.zeros(2)
+
             # Only update motor positions if the goal has significantly changed
             if np.linalg.norm(goal - self.state.last_goal) > self.config.goal_change_threshold:
-                self.control_cmd.motor_position_control(goal, lumbar_pos)
+                self.control_cmd.motor_position_control(goal, lumbar_pos, head_pos)
                 self.state.last_goal = goal
             self.state.ticks += 1
 
@@ -292,7 +295,7 @@ class RobotControl:
         """Thread function for puppy_move_unity mode"""
         print("Starting puppy_move_unity thread")
         while not stop_event.is_set():
-            print('playing')
+            # print('playing')
             self.get_vel_data()
 
             # Asynchronously calculate foot placements
@@ -309,11 +312,12 @@ class RobotControl:
                 self.state.joint_angles * 180 / 3.14 * DEGREE_TO_SERVO
                 + self.config.leg_center_position
             )
-
+            print(self.joint_states.head_angles)
             lumbar_pos = self.joint_states.lumbar_angles * DEGREE_TO_SERVO
+            head_pos = self.joint_states.head_angles * DEGREE_TO_SERVO
             # Only update motor positions if the goal has significantly changed
             if np.linalg.norm(goal - self.state.last_goal) > self.config.goal_change_threshold:
-                self.control_cmd.motor_position_control(goal, lumbar_pos)
+                self.control_cmd.motor_position_control(goal, lumbar_pos, head_pos)
                 self.state.last_goal = goal
             self.state.ticks += 1
 
@@ -327,21 +331,13 @@ class RobotControl:
         print("Starting unity_mirror thread")
         t0 = time.time()
         while not stop_event.is_set():
-            position = np.zeros(14)
+            position = np.zeros(16)
 
             self.control_cmd.dynamixel.updateMotorData()
             # print('motor_update')
 
             for i, motor in enumerate(self.control_cmd.dynamixel.motors):
                 position[i] = motor.PRESENT_POSITION_value
-
-            print(position)
-
-            # for i in range(14):
-            #     self.control_cmd.dynamixel.motors
-            #     position[i], _, _ = self.control_cmd.dynamixel.packet_handler.read4ByteTxRx(
-            #         self.control_cmd.dynamixel.port_handler, i+1, 132
-            #     )
             
             motor_angles = position/DEGREE_TO_SERVO-180
             self.leg_angles = np.zeros([3, 4])
@@ -353,7 +349,7 @@ class RobotControl:
             
             joint_state_msg = JointState()
             joint_state_msg.name = [
-                'FR', 'FL', 'RR', 'RL', 'LUMBAR'
+                'FR', 'FL', 'RR', 'RL', 'LUMBAR', 'HEAD', 'MOUTH'
             ]
             joint_state_msg.x = self.leg_angles[0, :].tolist()  # First row (all columns)
             joint_state_msg.y = self.leg_angles[1, :].tolist()  # Second row (all columns)
@@ -361,6 +357,12 @@ class RobotControl:
             joint_state_msg.x.append(0.0)  # Lumbar X
             joint_state_msg.y.append(motor_angles[12])  # Lumbar Y
             joint_state_msg.z.append(motor_angles[13])  # Lumbar Z
+            joint_state_msg.x.append(0.0)  # Head X
+            joint_state_msg.y.append(motor_angles[14])  # Head Y
+            joint_state_msg.z.append(0.0)  # Head Z
+            joint_state_msg.x.append(0.0)  # Mouth X
+            joint_state_msg.y.append(motor_angles[15])  # Mouth Y
+            joint_state_msg.z.append(0.0)  # Mouth Z
             self.JointStatesPublisher.publisher_.publish(joint_state_msg)
 
             # Add a small sleep to prevent CPU overuse
@@ -392,9 +394,10 @@ class ControlCmd:
                         'FL_higher', 'FL_lower', 'FL_hip',
                        'RR_higher', 'RR_lower', 'RR_hip',
                        'RL_higher', 'RL_lower', 'RL_hip',
-                       'lumbar_y', 'lumbar_z']
+                       'lumbar_y', 'lumbar_z',
+                       'head', 'mouth']
 
-        self.motor_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        self.motor_ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         self.motors = {name: self.dynamixel.createMotor(name, motor_number=id_) 
                     for name, id_ in zip(motor_names, self.motor_ids)}
 
@@ -441,7 +444,8 @@ class ControlCmd:
     def reset_to_original(self, position=None):
         self.motor_position_control()
 
-    def motor_position_control(self, position=None, lumbar_pos=None):
+    def motor_position_control(self, position=None, lumbar_pos=None, head_pos=None):
+        print(head_pos)
         if position is None:
             position = [[2048 ,2048, 2048, 2048],
                         [1992, 2047, 2092, 2099],
@@ -454,7 +458,8 @@ class ControlCmd:
         # lock lumbar
         self.motors['lumbar_y'].writePosition(int(2048+lumbar_pos[0]))
         self.motors['lumbar_z'].writePosition(int(2048+lumbar_pos[1]))
-        print('lumbar_pos', lumbar_pos)
+        self.motors['head'].writePosition(int(2048+head_pos[0]))
+        self.motors['mouth'].writePosition(int(2048+head_pos[1]))
         self.dynamixel.sentAllCmd()
 
 def main():

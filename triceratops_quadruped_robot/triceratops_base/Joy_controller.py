@@ -5,6 +5,10 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import String
 import time
 # from champ_interfaces.srv import SetMode
+import sys, os
+sys.path.append(os.path.expanduser("~/UnityRos2_ws/src/unity_robotics_demo_msgs"))
+from unity_robotics_demo_msgs.msg import JointState
+from unity_robotics_demo_msgs.srv import UnityAnimateService
 
 
 class TriceratopsControlClient(Node):
@@ -12,6 +16,9 @@ class TriceratopsControlClient(Node):
         super().__init__('JoyControlClient')
         self.create_subscription(Joy, "joy", self.joy_callback, 1)
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 1)
+        self.body_pub = self.create_publisher(String, 'body_pose', 1)
+        self.cli = self.create_client(UnityAnimateService, 'UnityAnimate_srv')
+        self.req = UnityAnimateService.Request()
         
         self.current_mode = ""
 
@@ -35,12 +42,16 @@ class TriceratopsControlClient(Node):
             time.sleep(0.01)
         elif(data.buttons[0]==1 and self.current_mode != "a"):
             self.current_mode = "a"
+            self.req.mode = "connect"
+            self.future = self.cli.call_async(self.req)
             time.sleep(0.01)            
         elif(data.buttons[2]==1):
             self.current_mode = "x"
             time.sleep(0.01)
         elif(data.buttons[1]==1 and self.current_mode != "b"):
             self.current_mode = "b"
+            self.req.mode = "puppy_move"
+            self.future = self.cli.call_async(self.req)
             time.sleep(0.01)
         elif(data.buttons[9]==1 and self.current_mode != "start"):
             self.current_mode = "start"
@@ -64,6 +75,8 @@ class TriceratopsControlClient(Node):
 
     def timer_callback(self):
         vel = Twist()
+        pose = String()
+        pose.data = str(self.current_mode)
         
         if self.joy is not None:
             if self.joy.axes[1]>0.001:
@@ -80,6 +93,7 @@ class TriceratopsControlClient(Node):
                 vel.angular.z = self.joy.axes[2]*self.angular_scale
 
         self.cmd_pub.publish(vel)
+        self.body_pub.publish(pose)
         
 def main(args=None):
     rclpy.init(args=args)

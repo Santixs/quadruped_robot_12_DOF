@@ -59,7 +59,7 @@ class RobotConfiguration:
 
         #################### SWING ######################
         self.z_coeffs = None
-        self.z_clearance = 0.03
+        self.z_clearance = 0.025
         self.alpha = (
             1  # Ratio between touchdown distance and total horizontal stance movement
         )
@@ -74,11 +74,13 @@ class RobotConfiguration:
             [[1, 1, 1, 0], [1, 0, 1, 1], [1, 0, 1, 1], [1, 1, 1, 0]]
         )
         self.overlap_time = (
-            0.15  # duration of the phase where all four feet are on the ground
+            0.20  # duration of the phase where all four feet are on the ground 0.15
         )
         self.swing_time = (
-            0.2  # duration of the phase when only two feet are on the ground
-        )
+            0.25  # duration of the phase when only two feet are on the ground 0.20
+        ) 
+
+        self.step_duration = self.phase_length * self.dt 
         
     @property
     def default_stance(self):

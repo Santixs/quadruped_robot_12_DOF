@@ -1,0 +1,12 @@
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.txt.*
+*.txt
+*.log
+*.log.*
+

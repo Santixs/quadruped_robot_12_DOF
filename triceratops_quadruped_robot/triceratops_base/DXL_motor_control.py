@@ -880,10 +880,13 @@ def MotorReadTest(DEVICE_NAME, B_RATE):
     ID = 1
     dynamixel = DXL_Communication(DEVICE_NAME, B_RATE)
     dynamixel.activateDXLConnection()
-    motor = dynamixel.createMotor('test', motor_number=ID)
+    for i in range(14):
+        motor = dynamixel.createMotor(f'test{i+1}', motor_number=i+1)
     # dynamixel.activateIndirectMode()
     dynamixel.addAllBuckPrarmeter()
+    print('add all params')
     dynamixel.updateMotorData()
+    print('updated')
 
     print("torque enable: {0}".format(motor.TORQUE_ENABLE_value))
     # print("present current: {0}".format(motor.PRESENT_CURRENT_value))
@@ -934,7 +937,7 @@ def MotorReadTest(DEVICE_NAME, B_RATE):
         pwm, _, _ = packetHandler.read2ByteTxRx(portHandler, ID,  124)
         temp, _, _ = packetHandler.read1ByteTxRx(portHandler, ID, 146)
         count += 1
-        print(torque)
+        # print(torque)
     
     
     # print((time.time()-stamp)/count)

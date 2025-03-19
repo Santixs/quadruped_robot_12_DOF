@@ -132,7 +132,7 @@ class RobotConfiguration:
 class RobotDynamixel:
     def __init__(self):
         self.DEVICE_NAME = "/dev/ttyUSB0"
-        self.B_RATE      = 57600
+        self.B_RATE      = 2000000
         self.LED_ADDR_LEN = (65,1)
         self.LED_ON = 1
         self.LED_OFF = 0

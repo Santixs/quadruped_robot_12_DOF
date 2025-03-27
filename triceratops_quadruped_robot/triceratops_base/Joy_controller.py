@@ -68,6 +68,15 @@ class TriceratopsControlClient(Node):
         elif(data.axes[2]==-1 and self.current_mode != "right"):
             self.current_mode = "right"
             time.sleep(0.01)
+        elif(data.buttons[12]==1):
+            if self.current_mode != "panda_move":
+                self.current_mode = "panda_move"
+                self.req.mode = "panda_move"
+            else:
+                self.current_mode = "puppy_move"
+                self.req.mode = "puppy_move"
+            self.future = self.cli.call_async(self.req)
+            time.sleep(0.01)
         else:
             self.current_mode = " "
         self.get_logger().info(f"The current mode {self.current_mode}")

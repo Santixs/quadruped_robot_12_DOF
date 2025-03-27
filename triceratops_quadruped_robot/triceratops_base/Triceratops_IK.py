@@ -1,10 +1,17 @@
 import numpy as np
 from transforms3d.euler import euler2mat
-from math import pi
+import math
 
 class InverseKinematics():
     def __init__(self, config):
         self.config = config
+        # Add servo limits in radians
+        # 0 to 4095 units = 0 to 2π radians
+        self.SERVO_LIMITS = np.array([
+            [-math.pi, math.pi],    # abduction (gamma)
+            [-math.pi, math.pi],    # hip (alpha)
+            [-math.pi, math.pi]     # knee (beta)
+        ])
             
     def leg_explicit_inverse_kinematics(self, r_body_foot, leg_index):
         """Find the joint angles corresponding to the given body-relative foot position for a given leg and configuration
@@ -53,7 +60,7 @@ class InverseKinematics():
         
         alpha = alpha2 + alpha1
 
-        hip_angle = pi/2 - alpha
+        hip_angle = math.pi/2 - alpha
 
         return np.array([gamma, hip_angle, beta])
     
@@ -76,8 +83,8 @@ class InverseKinematics():
             The angle of the servo that drives the outside of the linkage
         '''
         
-        THETA0 = 2*pi - 0.75*pi -THETA3 -THETA2
-        THETA0 = pi/2- THETA0
+        THETA0 = 2*math.pi - 0.75*math.pi -THETA3 -THETA2
+        THETA0 = math.pi/2- THETA0
 
         return THETA0
 
@@ -103,9 +110,25 @@ class InverseKinematics():
                 r_body_foot[:, i] - body_offset, i,
             )
             alpha[2, i] = self.lower_leg_angle_to_servo_angle(alpha[1, i], alpha[2, i])
+            
+            # Clip angles to servo limits
+            alpha[:, i] = np.clip(alpha[:, i], 
+                                 self.SERVO_LIMITS[:, 0],  # minimum angles
+                                 self.SERVO_LIMITS[:, 1])  # maximum angles
 
         alpha = np.array([[   alpha[0, 0],    - alpha[0, 1],   - alpha[0, 2],     alpha[0, 3]],
                           [   alpha[1, 0],    - alpha[1, 1],   - alpha[1, 2],     alpha[1, 3]],
                           [   alpha[2, 0],    - alpha[2, 1],   - alpha[2, 2],     alpha[2, 3]]])
 
         return alpha
+
+    def radians_to_servo_units(self, angle_rad):
+        """Convert angle from radians to servo units (0-4095)"""
+        # Map [-π, π] to [0, 4095]
+        units = (angle_rad + math.pi) * (4095 / (2 * math.pi))
+        return int(np.clip(units, 0, 4095))
+
+    def servo_units_to_radians(self, units):
+        """Convert servo units (0-4095) to radians"""
+        # Map [0, 4095] to [-π, π]
+        return (units * (2 * math.pi) / 4095) - math.pi

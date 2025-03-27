@@ -1,16 +1,16 @@
+#!/usr/bin/env python3
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation
 
 from Triceratops_Config import RobotConfiguration, RobotDynamixel
-
 from DXL_motor_control import DXL_Communication
 from Gait_controller import GaitController
 from Swing_controller import SwingController
 from Stance_controller import StanceController
-
 from Triceratops_IK import InverseKinematics
+from Body_controller_panda import BodyController
 from Triceratops_FK import ForwardKinematics
 
 import rclpy
@@ -22,6 +22,7 @@ from unity_robotics_demo_msgs.msg import JointState
 from unity_robotics_demo_msgs.srv import UnityAnimateService
 
 from math import pi
+import math
 import threading
 import queue
 import traceback
@@ -43,16 +44,9 @@ class CmdVelSubscriber(Node):
             self.listener_callback,
             10
         )
-
-        self.linear_x = 0.0
-        self.linear_y = 0.0
-        self.linear_z = 0.0
-
-        self.angular_x = 0.0
-        self.angular_y = 0.0
-        self.angular_z = 0.0
-
-        self.get_logger().info('Vel Subscriber has been started')
+        self.linear_x = self.linear_y = self.linear_z = 0.0
+        self.angular_x = self.angular_y = self.angular_z = 0.0
+        self.get_logger().info('Vel Subscriber started')
 
     def listener_callback(self, msg):
         self.linear_x = msg.linear.x
@@ -63,16 +57,10 @@ class CmdVelSubscriber(Node):
         self.angular_y = msg.angular.y
         self.angular_z = msg.angular.z
 
-
 class JointStatesPublisher(Node):
     def __init__(self):
         super().__init__('joint_states_publisher')
         self.publisher_ = self.create_publisher(JointState, 'joint_states_record', 10)
-
-        # self.joint_names = []
-        # self.foot_endpoints = np.zeros([3, 4])
-        # self.lumbar_angles = np.zeros(2)
-
         self.get_logger().info('JointStates Publisher has been started')
 
 class JointStatesSubscriber(Node):
@@ -84,8 +72,6 @@ class JointStatesSubscriber(Node):
             self.listener_callback,
             10
         )
-        # self.publisher_ = self.create_publisher(JointState, 'joint_states_play', 10)
-
         self.joint_names = []
         self.foot_endpoints = np.zeros([3, 4])
         self.lumbar_angles = np.zeros(2)
@@ -107,10 +93,9 @@ class JointStatesSubscriber(Node):
         self.head_angles = np.array([-msg.z[5]+30, msg.z[6]])
 
 class SwitchModeService(Node):
-
     def __init__(self):
         super().__init__('switch_mode_service')
-        self.mode = 'idle'
+        self.mode = 'panda_move' #We can change this to 'idle' or 'panda_move' to test manually 
         self.srv = self.create_service(UnityAnimateService, 'UnityAnimate_srv', self.switch_mode_callback)
 
     def switch_mode_callback(self, request, response):
@@ -124,9 +109,9 @@ class RobotState:
         self.config = RobotConfiguration()
         self.ticks = 0                    
         self.height = -0.10
-        self.foot_locations = self.config.default_stance
+        self.foot_locations = self.config.default_stance.copy()
         self.joint_angles = np.zeros((3, 4))
-        self.last_goal = np.zeros(4) 
+        self.last_goal = np.zeros((3, 4))
 
 class Command:
     def __init__(self):
@@ -136,39 +121,48 @@ class Command:
 
 class RobotControl:
     def __init__(self):
+        # ROS2 Nodes Setup
         self.cmd_vel = CmdVelSubscriber()
         self.joint_states = JointStatesSubscriber()
         self.JointStatesPublisher = JointStatesPublisher()
         self.switch_mode_service = SwitchModeService()
+        
+        # Executor with multiple nodes
         self.executor = rclpy.executors.SingleThreadedExecutor()
         self.executor.add_node(self.cmd_vel)
         self.executor.add_node(self.joint_states)
         self.executor.add_node(self.JointStatesPublisher)
         self.executor.add_node(self.switch_mode_service)
-
+        
         self.spin_thread = threading.Thread(target=self.executor.spin, daemon=True)
         self.spin_thread.start()
 
+        # Gait and Motion Configuration
         self.config = RobotConfiguration()
         self.gait_controller = GaitController(self.config)
         self.swing_controller = SwingController(self.config)
         self.stance_controller = StanceController(self.config)
         self.inverse_kinematics = InverseKinematics(self.config)
         self.forward_kinematics = ForwardKinematics(self.config)
+        self.body_controller = BodyController(step_duration=self.config.step_duration)
 
+        # State Management
         self.state = RobotState()
         self.command = Command()
         self.control_cmd = ControlCmd()
 
+        # Mode Handling System
         self.mode_threads = {
             'puppy_move': None,
             'play': None,
-            'connect': None
+            'connect': None,
+            'panda_move': None
         }
         self.stop_events = {
             'puppy_move': threading.Event(),
             'play': threading.Event(),
-            'connect': threading.Event()
+            'connect': threading.Event(),
+            'panda_move': threading.Event()
         }
         self.current_mode = 'idle'
 
@@ -187,17 +181,11 @@ class RobotControl:
         new_foot_locations = np.zeros((3, 4))
 
         for leg_index in range(4):
-            contact_mode = contact_modes[leg_index]
-            # foot_location = state.foot_locations[:, leg_index]
-            if contact_mode == 1:  
+            if contact_modes[leg_index] == 1:  
                 new_location = self.stance_controller.next_foot_location(leg_index, state, command)
-            else: 
-                swing_proportion = (
-                    self.gait_controller.subphase_ticks(state.ticks) / self.config.swing_ticks
-                )
-                new_location = self.swing_controller.next_foot_location(
-                    swing_proportion, leg_index, state, command
-                )
+            else:
+                swing_proportion = self.gait_controller.subphase_ticks(state.ticks) / self.config.swing_ticks
+                new_location = self.swing_controller.next_foot_location(swing_proportion, leg_index, state, command)
             new_foot_locations[:, leg_index] = new_location
 
         return new_foot_locations, contact_modes
@@ -247,15 +235,20 @@ class RobotControl:
                         args=(self.stop_events['connect'],)
                     )
                     self.mode_threads['connect'].start()
-                    
+
+                elif new_mode == 'panda_move':
+                    self.control_cmd.enable_all_motor()
+                    self.mode_threads['panda_move'] = threading.Thread(
+                        target=self.panda_move_thread, args=(self.stop_events['panda_move'],))
+                    self.mode_threads['panda_move'].start()
+
                 elif new_mode == 'idle':
                     self.control_cmd.disable_all_motor()
                     # No thread to start for idle mode
-                
+
                 self.current_mode = new_mode
-            
-            time.sleep(0.1)  # Check for mode changes every 100ms
-    
+            time.sleep(0.1)
+
     def puppy_move_thread(self, stop_event):
         """Thread function for puppy_move mode"""
         print("Starting puppy_move thread")
@@ -290,7 +283,57 @@ class RobotControl:
             time.sleep(0.01)
         
         print("Exiting puppy_move thread")
-    
+
+    def panda_move_thread(self, stop_event):
+        TRUNK_VERTICAL_SCALE = 4000.0
+        TRUNK_HORIZONTAL_SCALE = 4000.0
+        TRUNK_CENTER = 2048
+
+        print("Starting panda_move thread")
+        try:
+            while not stop_event.is_set():
+                self.get_vel_data()
+
+                # Asynchronously calculate foot placements
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(self.step_gait, self.state, self.command)
+                    new_foot_locations, contact_modes = future.result()
+
+                # Panda-specific body control
+                try:
+                    trunk_offsets = self.body_controller.update(self.config.dt, self.cmd_vel, contact_modes)
+                    effective_locations = new_foot_locations.copy()
+                    effective_locations[1, :] -= trunk_offsets['hip']
+                    effective_locations[2, :] -= trunk_offsets['back']
+
+                    self.state.joint_angles = self.inverse_kinematics.four_legs_inverse_kinematics(effective_locations)
+                    leg_goal = (self.state.joint_angles * 180 / math.pi * DEGREE_TO_SERVO + self.config.leg_center_position)
+                    
+                    # Trunk motor calculations
+                    trunk_goal = {
+                        'hip_vertical': int(TRUNK_CENTER + trunk_offsets['back'] * TRUNK_VERTICAL_SCALE),
+                        'hip_horizontal': int(TRUNK_CENTER + trunk_offsets['hip'] * TRUNK_HORIZONTAL_SCALE)
+                    }
+
+                    if np.linalg.norm(leg_goal - self.state.last_goal) > self.config.goal_change_threshold:
+                        self.control_cmd.motor_position_control(leg_goal, 
+                                                             [trunk_goal['hip_vertical'], trunk_goal['hip_horizontal']], 
+                                                             np.zeros(2))
+                        self.state.last_goal = leg_goal.copy()
+
+                    self.state.foot_locations = new_foot_locations.copy()
+                    self.state.ticks += 1
+                except Exception as e:
+                    print(f"Error in panda move control loop: {str(e)}")
+                    continue
+
+                time.sleep(self.config.dt)
+        except Exception as e:
+            print(f"Fatal error in panda_move_thread: {str(e)}")
+        finally:
+            print("Exiting panda_move thread")
+
+
     def puppy_move_unity_thread(self, stop_event):
         """Thread function for puppy_move_unity mode"""
         print("Starting puppy_move_unity thread")
@@ -373,6 +416,7 @@ class RobotControl:
         
         print("Exiting unity_mirror thread")
 
+
 class ControlCmd:
     """Low-level control of Dynamixel motors."""
     def __init__(self):
@@ -381,7 +425,6 @@ class ControlCmd:
         self.initialize_motor_states()
         self.config = RobotConfiguration()
         self.forward_kinematics = ForwardKinematics(self.config)
-        
         self.walking_freq = 2000  # 2000Hz
 
     def setup_dynamixel(self):
@@ -401,19 +444,38 @@ class ControlCmd:
         self.motors = {name: self.dynamixel.createMotor(name, motor_number=id_) 
                     for name, id_ in zip(motor_names, self.motor_ids)}
 
+        # Motor organization
         self.leg_motor_list = [
             [self.motors['FR_hip'], self.motors['FL_hip'], self.motors['RR_hip'], self.motors['RL_hip']],
             [self.motors['FR_higher'], self.motors['FL_higher'], self.motors['RR_higher'], self.motors['RL_higher']],
             [self.motors['FR_lower'], self.motors['FL_lower'], self.motors['RR_lower'], self.motors['RL_lower']]
         ]
-    
+        
+        self.trunk_motors = {
+            'lumbar_y': self.motors['lumbar_y'],
+            'lumbar_z': self.motors['lumbar_z']
+        }
+        self.body_motors = {
+            'lumbar': [self.motors['lumbar_y'], self.motors['lumbar_z']],
+            'head': [self.motors['head'], self.motors['mouth']]
+        }
+
     def initialize_motor_states(self):
-        self.dynamixel.addAllBuckPrarmeter()
-        print('add all params')
-        # self.dynamixel.rebootAllMotor()
-        self.dynamixel.updateMotorData()
-        # self.enable_all_motor()
-        self.joint_position = np.zeros(12)
+        try:
+            self.dynamixel.rebootAllMotor()
+            print("Motors rebooted successfully")
+            time.sleep(0.5)  # Give some time for reboot
+            
+            self.dynamixel.updateMotorData()
+            print("Motor data updated successfully")
+            
+            self.enable_all_motor()
+            print("Motors enabled successfully")
+            
+            self.joint_position = np.zeros(12)
+        except Exception as e:
+            print(f"Error during motor initialization: {str(e)}")
+            raise
 
     def __del__(self):
         self.cleanup()
@@ -423,12 +485,16 @@ class ControlCmd:
         self.dynamixel.closeHandler()
 
     def enable_all_motor(self):
+        print("Enabling all motors...")
         for motor in self.motors.values():
-            motor.enableMotor()
+            if motor is not None:  # Add check for None
+                motor.enableMotor()
 
     def disable_all_motor(self):
+        print("Disabling all motors...")
         for motor in self.motors.values():
-            motor.disableMotor()
+            if motor is not None:  # Add check for None
+                motor.disableMotor()
 
     def read_all_motor_data(self):
         self.update_joint_state()
@@ -455,22 +521,20 @@ class ControlCmd:
             for j, motor in enumerate(motor_list):
                 motor.writePosition(int(position[i][j]))
         
-        # lock lumbar
+        
         self.motors['lumbar_y'].writePosition(int(2048+lumbar_pos[0]))
         self.motors['lumbar_z'].writePosition(int(2048+lumbar_pos[1]))
         self.motors['head'].writePosition(int(2048+head_pos[0]))
         self.motors['mouth'].writePosition(int(2048+head_pos[1]))
         self.dynamixel.sentAllCmd()
 
+
 def main():
     rclpy.init()
     robot_control = RobotControl()
 
     command_dict = {
-        # "s":robot_control.puppy_move,
-        # "u":robot_control.puppy_move_unitiy,
-        # "r":robot_control.unity_mirror,
-        "a":robot_control.mode_handler
+         "a":robot_control.mode_handler  #Mode handler
     }
 
     atexit.register(robot_control.cleanup)

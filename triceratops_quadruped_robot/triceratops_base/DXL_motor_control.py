@@ -44,34 +44,45 @@ class DXL_Communication(object):
 
     def activateDXLConnection(self):
         try:
+            print(f"Attempting to open port {self.port_handler.port_name} at {self.BAUDRATE} baud")
             if self.port_handler.openPort():
+                print("Port opened successfully")
                 self.log.info("Succeeded to open the port", self.activateDXLConnection)
                 self.portHandler_Check_Pass = True
             else:
+                print("Failed to open port")
                 self.log.warning("Failed to open the port", self.activateDXLConnection)
-                self.log.warning("{ System will run WITHOUT Real Mortor", self.activateDXLConnection)
+                self.log.warning("System will run WITHOUT Real Motor", self.activateDXLConnection)
                 self.portHandler_Check_Pass = False
                 self.closeHandler()
-        except Exception:
+                return
+            
+            # Set port baudrate
+            if self.portHandler_Check_Pass:
+                print(f"Setting baudrate to {self.BAUDRATE}")
+                if self.port_handler.setBaudRate(self.BAUDRATE):
+                    print("Baudrate set successfully")
+                    self.log.info("Succeeded to change the baudrate", self.activateDXLConnection)
+                    self.portHandler_Check_Pass = True
+                else:
+                    print("Failed to set baudrate")
+                    self.log.error("Failed to change the baudrate", self.activateDXLConnection)
+                    self.log.warning("System will run WITHOUT Real Motor", self.activateDXLConnection)
+                    self.portHandler_Check_Pass = False
+                    self.closeHandler()
+                    return
+            
+            self.motors = []
+            self.parm = []
+            print("DXL Connection activated successfully")
+            
+        except Exception as e:
+            print(f"Exception during DXL activation: {str(e)}")
             self.log.exception("", self.activateDXLConnection)
             self.log.warning("Failed to open the port", self.activateDXLConnection)
-            self.log.warning("System will run WITHOUT Real Mortor", self.activateDXLConnection)
+            self.log.warning("System will run WITHOUT Real Motor", self.activateDXLConnection)
             self.portHandler_Check_Pass = False
             return
-        
-        # Set port baudrate
-        if self.portHandler_Check_Pass:
-            if self.port_handler.setBaudRate(self.BAUDRATE):
-                self.log.info("Succeeded to change the baudrate", self.activateDXLConnection)
-                self.portHandler_Check_Pass = True
-            else:
-                self.log.error("Failed to change the baudrate", self.activateDXLConnection)
-                self.log.warning("System will run WITHOUT Real Mortor", self.activateDXLConnection)
-                self.portHandler_Check_Pass = False
-                self.closeHandler()
-        
-        self.motors = []
-        self.parm = []
 
     def addAllBuckPrarmeter(self):
         self.groupBulkRead.clearParam()

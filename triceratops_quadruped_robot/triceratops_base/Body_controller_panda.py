@@ -5,7 +5,7 @@ import math
 """
 Hip (lateral) movement: hip_offset = base_yaw_amplitude * sin(2π * phase_ratio + phase_shift)
     - When the robot is going straight (turning rate below the threshold), no phase shift is applied. This means the lateral oscillation follows a clean sine wave with an amplitude of 0.05 meters (the default base_yaw_amplitude).
-    - If the robot is turning (angular rate above the threshold), a phase shift proportional to the turning rate is added. This shifts the sine wave slightly, altering the timing of the hip’s lateral movement relative to the gait cycle.
+    - If the robot is turning (angular rate above the threshold), a phase shift proportional to the turning rate is added. This shifts the sine wave slightly, altering the timing of the hip's lateral movement relative to the gait cycle.
     - The code checks the contact status of the back legs. If one is off the ground while the other is on, a fixed bias (0.02 meters by default, hip_bias_amplitude) is added.
 
         Example: if the Back Right leg is off and Rear Left is on, the bias is negative (what means that we shift the hip to the right), and vice versa.
@@ -23,11 +23,11 @@ A reduction factor of 0.2X has been applied to the lienar and angular speeds.
 
 class BodyController:
     def __init__(self, step_duration,
-                 base_yaw_amplitude=0.01, #
+                 base_yaw_amplitude=0.01,
                  base_vertical_amplitude=0.01,
-                 hip_bias_amplitude=0.01, #
+                 hip_bias_amplitude=0.01,
                  straight_threshold=0.05,
-                 linear_threshold=0.01,
+                 linear_threshold=0.05,
                  twist_linear_scale=0.2,      
                  twist_angular_scale=0.2):
         """
@@ -70,7 +70,7 @@ class BodyController:
         
         Returns:
         - dict: {'hip': <lateral offset in meters>, 'back': <vertical offset in meters>}
-          These offsets should be applied to the robot’s body frame prior to computing leg inverse kinematics.
+          These offsets should be applied to the robot's body frame prior to computing leg inverse kinematics.
         """
         # Update the internal timer and compute normalized phase.
         self.t = (self.t + dt) % self.step_duration

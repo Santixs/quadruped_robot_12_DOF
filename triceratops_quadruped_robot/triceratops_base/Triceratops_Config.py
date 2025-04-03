@@ -3,10 +3,10 @@ import numpy as np
 
 class RobotState:
     def __init__(self):
-        self.yaw_rate = 0.0
+        self.yaw_rate = 0
         self.target_height = 16
-        self.pitch = 0.0
-        self.roll = 0.0
+        self.pitch = 0.
+        self.roll = 0
 
         self.foot_locations = np.zeros((3, 4))
         self.joint_angles = np.zeros((3, 4))

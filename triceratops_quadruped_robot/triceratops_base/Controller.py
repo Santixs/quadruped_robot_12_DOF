@@ -95,7 +95,7 @@ class JointStatesSubscriber(Node):
 class SwitchModeService(Node):
     def __init__(self):
         super().__init__('switch_mode_service')
-        self.mode = 'panda_move' #We can change this to 'idle' or 'panda_move' to test manually 
+        self.mode = 'puppy_move' #We can change this to 'idle' or 'panda_move' to test manually 
         self.srv = self.create_service(UnityAnimateService, 'UnityAnimate_srv', self.switch_mode_callback)
 
     def switch_mode_callback(self, request, response):
@@ -314,7 +314,7 @@ class RobotControl:
                         'hip_vertical': int(TRUNK_CENTER + trunk_offsets['back'] * TRUNK_VERTICAL_SCALE),
                         'hip_horizontal': int(TRUNK_CENTER + trunk_offsets['hip'] * TRUNK_HORIZONTAL_SCALE)
                     }
-
+                    #print(trunk_goal)
                     if np.linalg.norm(leg_goal - self.state.last_goal) > self.config.goal_change_threshold:
                         self.control_cmd.motor_position_control(leg_goal, 
                                                              [trunk_goal['hip_vertical'], trunk_goal['hip_horizontal']], 
@@ -355,7 +355,7 @@ class RobotControl:
                 self.state.joint_angles * 180 / 3.14 * DEGREE_TO_SERVO
                 + self.config.leg_center_position
             )
-            print(self.joint_states.head_angles)
+            #print(self.joint_states.head_angles)
             lumbar_pos = self.joint_states.lumbar_angles * DEGREE_TO_SERVO
             head_pos = self.joint_states.head_angles * DEGREE_TO_SERVO
             # Only update motor positions if the goal has significantly changed
@@ -511,21 +511,54 @@ class ControlCmd:
         self.motor_position_control()
 
     def motor_position_control(self, position=None, lumbar_pos=None, head_pos=None):
-        print(head_pos)
+        #print(head_pos)
         if position is None:
             position = [[2048 ,2048, 2048, 2048],
                         [1992, 2047, 2092, 2099],
                         [2048 ,2048, 2048, 2048]]
         
+        # Control leg motors
         for i, motor_list in enumerate(self.leg_motor_list):
             for j, motor in enumerate(motor_list):
                 motor.writePosition(int(position[i][j]))
         
+        # Handle lumbar motors
+        if lumbar_pos is not None:
+            # Check if these are already absolute positions (from panda_move_thread)
+            # Values close to 2048 indicate they're already centered
+            if lumbar_pos[0] > 500 or lumbar_pos[1] > 500:  # These are already absolute positions
+                # Just ensure they're within valid range (0-4095)
+                lumbar_y = max(min(int(lumbar_pos[0]), 4095), 0)
+                lumbar_z = max(min(int(lumbar_pos[1]), 4095), 0)
+                
+                self.motors['lumbar_y'].writePosition(lumbar_y)
+                self.motors['lumbar_z'].writePosition(lumbar_z)
+            else:
+                # These are relative offsets (from other modes)
+                # Clamp values between -2048 and 2048 then add to center
+                lumbar_y = max(min(int(lumbar_pos[0]), 2048), -2048)
+                lumbar_z = max(min(int(lumbar_pos[1]), 2048), -2048)
+                
+                self.motors['lumbar_y'].writePosition(2048 + lumbar_y)
+                self.motors['lumbar_z'].writePosition(2048 + lumbar_z)
         
-        self.motors['lumbar_y'].writePosition(int(2048+lumbar_pos[0]))
-        self.motors['lumbar_z'].writePosition(int(2048+lumbar_pos[1]))
-        self.motors['head'].writePosition(int(2048+head_pos[0]))
-        self.motors['mouth'].writePosition(int(2048+head_pos[1]))
+        # Handle head motors with range checking
+        if head_pos is not None:
+            # Apply the same logic for head motors
+            if head_pos[0] > 500 or head_pos[1] > 500:  # Already absolute positions
+                head_y = max(min(int(head_pos[0]), 4095), 0)
+                head_z = max(min(int(head_pos[1]), 4095), 0)
+                
+                self.motors['head'].writePosition(head_y)
+                self.motors['mouth'].writePosition(head_z)
+            else:
+                # Relative offsets
+                head_y = max(min(int(head_pos[0]), 2048), -2048)
+                head_z = max(min(int(head_pos[1]), 2048), -2048)
+                
+                self.motors['head'].writePosition(2048 + head_y)
+                self.motors['mouth'].writePosition(2048 + head_z)
+        
         self.dynamixel.sentAllCmd()
 
 
@@ -533,17 +566,36 @@ def main():
     rclpy.init()
     robot_control = RobotControl()
 
+    # Start mode handler in a separate thread automatically
+    mode_handler_thread = threading.Thread(target=robot_control.mode_handler)
+    mode_handler_thread.daemon = True
+    mode_handler_thread.start()
+
     command_dict = {
-         "a":robot_control.mode_handler  #Mode handler
+        "1": lambda: setattr(robot_control.switch_mode_service, 'mode', 'puppy_move'),
+        "2": lambda: setattr(robot_control.switch_mode_service, 'mode', 'play'),
+        "3": lambda: setattr(robot_control.switch_mode_service, 'mode', 'connect'),
+        "4": lambda: setattr(robot_control.switch_mode_service, 'mode', 'panda_move'),
+        "5": lambda: setattr(robot_control.switch_mode_service, 'mode', 'idle')
     }
 
     atexit.register(robot_control.cleanup)
 
+    print("\nMode handler started automatically!")
+    print("Press keys to change modes:")
+    print("1: puppy_move")
+    print("2: play")
+    print("3: connect")
+    print("4: panda_move")
+    print("5: idle")
+    print("'exit' to quit\n")
+
     while True:
         try:
-            cmd = input("CMD : ")
+            cmd = input()
             if cmd in command_dict:
                 command_dict[cmd]()
+                print(f"Switching to mode: {robot_control.switch_mode_service.mode}")
             elif cmd == "exit":
                 break
         except Exception as e:

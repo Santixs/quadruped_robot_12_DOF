@@ -23,13 +23,13 @@ A reduction factor of 0.2X has been applied to the lienar and angular speeds.
 
 class BodyController:
     def __init__(self, step_duration,
-                 base_yaw_amplitude=0.01,
+                 base_yaw_amplitude=0.005,
                  base_vertical_amplitude=0.01,
-                 hip_bias_amplitude=0.01,
+                 hip_bias_amplitude=0.005,
                  straight_threshold=0.05,
                  linear_threshold=0.05,
-                 twist_linear_scale=0.2,      
-                 twist_angular_scale=0.2):
+                 twist_linear_scale=0.1,      
+                 twist_angular_scale=0.1):
         """
         Initialize the BodyController.
         

@@ -27,8 +27,14 @@ class TriceratopsControlClient(Node):
         # Track button states to prevent continuous triggering
         self.last_button_states = {}
         
-        self.linear_x_scale = 0.1
-        self.linear_y_scale = 0.08
+        # Head and mouth positions (in degrees)
+        self.head_position = 200  # Initial value between 177 and 230
+        self.mouth_position = 150  # Initial value between 116 and 190
+        self.head_increment = 5    # Amount to change per button press
+        self.mouth_increment = 5   # Amount to change per button press
+        
+        self.linear_x_scale = 0.12
+        self.linear_y_scale = 0.12
         self.angular_scale = 1
         feq = 500
         self.joy = None
@@ -83,7 +89,7 @@ class TriceratopsControlClient(Node):
             self.get_logger().info("Button: Start (connect)")
             time.sleep(0.01)
         
-        # Directional inputs (these can trigger continuously)
+        # Directional inputs for body movements
         elif data.axes[3]==1:
             self.get_logger().info("Direction: Up")
             time.sleep(0.01)
@@ -97,17 +103,26 @@ class TriceratopsControlClient(Node):
             self.get_logger().info("Direction: Right")
             time.sleep(0.01)
 
+        # Directional inputs for head and mouth movement
         elif data.axes[7]==1:
-            self.get_logger().info("Direction: Arrow-Up")
+            # Up arrow - move head up
+            self.head_position = min(230, self.head_position + self.head_increment)
+            self.get_logger().info(f"Direction: Arrow-Up, Head Position: {self.head_position}")
             time.sleep(0.01)
         elif data.axes[7]==-1:
-            self.get_logger().info("Direction: Arrow-Down")
+            # Down arrow - move head down
+            self.head_position = max(177, self.head_position - self.head_increment)
+            self.get_logger().info(f"Direction: Arrow-Down, Head Position: {self.head_position}")
             time.sleep(0.01)
         elif data.axes[6]==1:
-            self.get_logger().info("Direction: Arrow-Left")
+            # Left arrow - open mouth
+            self.mouth_position = min(190, self.mouth_position + self.mouth_increment)
+            self.get_logger().info(f"Direction: Arrow-Left, Mouth Position: {self.mouth_position}")
             time.sleep(0.1)
         elif data.axes[6]==-1:
-            self.get_logger().info("Direction: Arrow-Right")
+            # Right arrow - close mouth
+            self.mouth_position = max(116, self.mouth_position - self.mouth_increment)
+            self.get_logger().info(f"Direction: Arrow-Right, Mouth Position: {self.mouth_position}")
             time.sleep(0.01)
     
         
@@ -146,6 +161,10 @@ class TriceratopsControlClient(Node):
                 vel.angular.z = self.joy.axes[2]*self.angular_scale
             elif self.joy.axes[2]<-0.001:
                 vel.angular.z = self.joy.axes[2]*self.angular_scale
+            
+            # Add head and mouth position information to the pose string
+            # Format: "mode:head_pos:mouth_pos"
+            pose.data = f"{self.current_mode}:{self.head_position}:{self.mouth_position}"
 
         self.cmd_pub.publish(vel)
         self.body_pub.publish(pose)

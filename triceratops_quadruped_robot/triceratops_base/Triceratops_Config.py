@@ -59,7 +59,7 @@ class RobotConfiguration:
 
         #################### SWING ######################
         self.z_coeffs = None
-        self.z_clearance = 0.025
+        self.z_clearance = 0.03
         self.alpha = (
             1  # Ratio between touchdown distance and total horizontal stance movement
         )

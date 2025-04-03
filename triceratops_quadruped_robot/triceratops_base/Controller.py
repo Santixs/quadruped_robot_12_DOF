@@ -20,6 +20,7 @@ import sys, os
 sys.path.append(os.path.expanduser("~/UnityRos2_ws/src/unity_robotics_demo_msgs"))
 from unity_robotics_demo_msgs.msg import JointState
 from unity_robotics_demo_msgs.srv import UnityAnimateService
+from std_msgs.msg import String
 
 from math import pi
 import math
@@ -118,6 +119,36 @@ class Command:
         self.horizontal_velocity = np.array([0.0, 0.0])
         self.yaw_rate = 0
         self.height = -0.10
+        self.head_position = 200  # Default head position
+        self.mouth_position = 150  # Default mouth position
+
+class BodyPoseSubscriber(Node):
+    def __init__(self):
+        super().__init__('body_pose_subscriber')
+        self.subscription = self.create_subscription(
+            String,
+            '/body_pose',
+            self.listener_callback,
+            10
+        )
+        # Initialize with default values
+        self.mode = "puppy_mode"
+        self.head_position = 200  # Default head position
+        self.mouth_position = 150  # Default mouth position
+        self.get_logger().info('Body Pose Subscriber has been started')
+
+    def listener_callback(self, msg):
+        # Parse the body pose message for mode and possibly head/mouth positions
+        parts = msg.data.split(':')
+        self.mode = parts[0]
+        
+        # If head and mouth positions are included in the pose string
+        if len(parts) >= 3:
+            try:
+                self.head_position = float(parts[1])
+                self.mouth_position = float(parts[2])
+            except ValueError:
+                self.get_logger().warn("Invalid head/mouth position values in body_pose")
 
 class RobotControl:
     def __init__(self):
@@ -126,6 +157,7 @@ class RobotControl:
         self.joint_states = JointStatesSubscriber()
         self.JointStatesPublisher = JointStatesPublisher()
         self.switch_mode_service = SwitchModeService()
+        self.body_pose = BodyPoseSubscriber()  # Use the new Node class
         
         # Executor with multiple nodes
         self.executor = rclpy.executors.SingleThreadedExecutor()
@@ -133,6 +165,7 @@ class RobotControl:
         self.executor.add_node(self.joint_states)
         self.executor.add_node(self.JointStatesPublisher)
         self.executor.add_node(self.switch_mode_service)
+        self.executor.add_node(self.body_pose)  # Add the new node to the executor
         
         self.spin_thread = threading.Thread(target=self.executor.spin, daemon=True)
         self.spin_thread.start()
@@ -169,6 +202,22 @@ class RobotControl:
     def get_vel_data(self):
         self.command.horizontal_velocity = np.array([self.cmd_vel.linear_x, self.cmd_vel.linear_y])
         self.command.yaw_rate = self.cmd_vel.angular_z
+        # Update head and mouth positions from the subscriber
+        self.command.head_position = self.body_pose.head_position
+        self.command.mouth_position = self.body_pose.mouth_position
+
+    def body_pose_callback(self, msg):
+        # Parse the body pose message for mode and possibly head/mouth positions
+        parts = msg.data.split(':')
+        mode = parts[0]
+        
+        # If head and mouth positions are included in the pose string
+        if len(parts) >= 3:
+            try:
+                self.command.head_position = float(parts[1])
+                self.command.mouth_position = float(parts[2])
+            except ValueError:
+                self.get_logger().warn("Invalid head/mouth position values in body_pose")
 
     def __del__(self):
         pass
@@ -270,8 +319,9 @@ class RobotControl:
                 + self.config.leg_center_position
             )
 
+            # Set head and mouth positions
+            head_pos = np.array([self.command.head_position, self.command.mouth_position]) * DEGREE_TO_SERVO
             lumbar_pos = np.zeros(2)
-            head_pos = np.zeros(2)
 
             # Only update motor positions if the goal has significantly changed
             if np.linalg.norm(goal - self.state.last_goal) > self.config.goal_change_threshold:

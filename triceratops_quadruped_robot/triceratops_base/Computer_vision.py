@@ -9,6 +9,7 @@ import os
 import socket
 import threading
 import requests
+from datetime import datetime
 
 # Add Flask for web streaming
 from flask import Flask, Response, render_template
@@ -19,6 +20,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
+from unity_robotics_demo_msgs.msg import JointState
+from unity_robotics_demo_msgs.srv import UnityAnimateService
 
 # Set environment variable for headless operation
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
@@ -281,36 +284,454 @@ set_camera_resolution(CAMERA_IP, "vga")  # Set to VGA resolution
 STREAM_URL = f"http://{CAMERA_IP}:81/stream"
 
 # --- Box Detection Configuration ---
-# Brown color ranges for different lighting conditions
-LOWER_BROWN1 = np.array([0, 20, 40])
-UPPER_BROWN1 = np.array([30, 255, 200])
-LOWER_BROWN2 = np.array([5, 20, 100])
-UPPER_BROWN2 = np.array([25, 180, 255])
-# New range for grayish-brown (60,60,56)
-LOWER_BROWN3 = np.array([20, 5, 15])  # Lower bound for grayish-brown
-UPPER_BROWN3 = np.array([40, 80, 80])  # Upper bound for grayish-brown
-# New range for grayish color (67,69,67)
-LOWER_BROWN4 = np.array([30, 2, 20])  # Lower bound for grayish
-UPPER_BROWN4 = np.array([90, 30, 100])  # Upper bound for grayish
+# Logo detection parameters
+BLACK_VALUE_THRESH = 45  
+MIN_LOGO_AREA = 400      
+MAX_LOGO_AREA = 3000     # Reduced to avoid large background areas
+DEBUG_MODE = False        # Set to False to disable debug info
 
-# Black detection parameters
-BLACK_VALUE_THRESH = 40
-MIN_LOGO_RATIO = 0.02  # Minimum logo area relative to box area
+# Pattern detection parameters
+MIN_WIDTH_HEIGHT_RATIO = 0.8   # More strict ratio for the logo
+MAX_WIDTH_HEIGHT_RATIO = 1.2
+MIN_EXTENT = 0.15             # Logo has specific coverage pattern
+MAX_EXTENT = 0.4              # Lower max extent to avoid background
+
+# Line pattern parameters
+MIN_LINE_LENGTH = 20          # Minimum length of lines to consider
+MIN_PARALLEL_LINES = 2        # Minimum number of parallel lines
+LINE_ANGLE_TOLERANCE = 5      # Degrees tolerance for parallel lines
+
+# Confidence parameters
+MIN_CONFIDENCE = 60           # Minimum confidence threshold
+DETECTION_BUFFER_SIZE = 3     # Number of frames to average
+detection_buffer = []         # Store recent detection confidences
+
+# Time-based detection parameters
+DETECTION_TIME_THRESHOLD = 1  # Time in seconds needed for stable detection
+MIN_DETECTION_RATIO = 0.4      # Minimum ratio of frames that must exceed confidence threshold
+detection_history = []         # Store detection history with timestamps
+detection_start_time = None    # Track when continuous detection started
+stable_detection = False       # Flag for stable detection state
 
 # Box detection state variables
 last_detection_time = 0
-box_is_present = False  # Flag to track box presence
-last_absence_time = 0   # Track when box was last absent
-min_time = 5
+box_is_present = False    
+last_absence_time = 0      
+min_time = 2              
+countdown_start = 0        
+program_start_time = 0     
+INITIAL_DELAY = 1          
+last_print_time = 0       
+
+# Mouth state variables
 mouth_open = False      # Flag to track mouth state
 mouth_open_time = 0     # Time when mouth was opened
 
+# Display style parameters
+BORDER_COLOR = (0, 255, 0)  # Green border
+TEXT_COLOR = (0, 255, 0)    # Green text
+SCAN_COLOR = (0, 255, 0)    # Green scan line
+CONTOUR_COLOR = (0, 0, 255) # Red for detected logo
+TRACKING_COLOR = (0, 255, 0) # Green for tracking box
+CORNER_LENGTH = 20          # Length of corner lines
+BORDER_THICKNESS = 1        # Thickness of border
+SCAN_LINE_SPEED = 3         # Speed of scanning line
+TEXT_SCALE = 0.5           # Size of text
+
+# Face Detection parameters
+FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+FACE_COLOR = (0, 0, 255)    # Red for face detection
+FACE_TEXT_COLOR = (0, 255, 0)  # Green for face text
+MIN_FACE_SIZE = (30, 30)    # Minimum face size to detect
+FACE_SCALE_FACTOR = 1.1     # How much the image size is reduced at each image scale
+FACE_MIN_NEIGHBORS = 5      # How many neighbors each candidate rectangle should have
+
+def find_parallel_lines(mask, min_length=20):
+    """Find sets of parallel lines in the image"""
+    # Use probabilistic Hough transform to detect lines
+    lines = cv2.HoughLinesP(mask, 1, np.pi/180, 50, 
+                           minLineLength=min_length, maxLineGap=10)
+    
+    if lines is None:
+        return [], []
+    
+    # Calculate line angles
+    angles = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        angle = np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180
+        angles.append(angle)
+    
+    # Group lines by angle
+    horizontal_lines = []
+    vertical_lines = []
+    
+    for i, angle in enumerate(angles):
+        # Check if line is horizontal-ish (0° ± tolerance) or vertical-ish (90° ± tolerance)
+        if angle < LINE_ANGLE_TOLERANCE or angle > (180 - LINE_ANGLE_TOLERANCE):
+            horizontal_lines.append(lines[i])
+        elif abs(angle - 90) < LINE_ANGLE_TOLERANCE:
+            vertical_lines.append(lines[i])
+    
+    return horizontal_lines, vertical_lines
+
+def analyze_logo_pattern(contour, mask):
+    """Analyze if the contour matches the specific logo pattern"""
+    # Get basic shape metrics
+    area = cv2.contourArea(contour)
+    x, y, w, h = cv2.boundingRect(contour)
+    
+    # Skip if area is outside bounds
+    if area < MIN_LOGO_AREA or area > MAX_LOGO_AREA:
+        return 0, None
+    
+    aspect_ratio = w / float(h)
+    if not (MIN_WIDTH_HEIGHT_RATIO <= aspect_ratio <= MAX_WIDTH_HEIGHT_RATIO):
+        return 0, None
+    
+    # Create mask for the contour region
+    roi_mask = np.zeros((h, w), dtype=np.uint8)
+    shifted_contour = contour - [x, y]
+    cv2.drawContours(roi_mask, [shifted_contour], 0, 255, -1)
+    
+    # Find lines in the contour region
+    horizontal_lines, vertical_lines = find_parallel_lines(roi_mask, MIN_LINE_LENGTH)
+    
+    # Calculate pattern scores
+    h_lines_score = min(1.0, len(horizontal_lines) / MIN_PARALLEL_LINES)
+    v_lines_score = min(1.0, len(vertical_lines) / MIN_PARALLEL_LINES)
+    
+    # Calculate extent (area coverage)
+    extent = area / (w * h)
+    if not (MIN_EXTENT <= extent <= MAX_EXTENT):
+        return 0, None
+    
+    # Get the convex hull for solidity calculation
+    hull = cv2.convexHull(contour)
+    hull_area = cv2.contourArea(hull)
+    solidity = area / hull_area if hull_area > 0 else 0
+    
+    # Calculate overall pattern score
+    pattern_score = (h_lines_score + v_lines_score) / 2.0
+    
+    # Calculate final confidence score with weighted components
+    confidence = (
+        pattern_score * 0.4 +           # Highest weight for parallel lines pattern
+        (1.0 - abs(1.0 - aspect_ratio)) * 0.2 +  # Square-ish shape
+        (1.0 - abs(0.3 - extent) / 0.3) * 0.2 +  # Specific coverage
+        (1.0 - abs(0.6 - solidity) / 0.6) * 0.2   # Specific solidity
+    ) * 100
+    
+    metrics = {
+        'area': area,
+        'aspect_ratio': aspect_ratio,
+        'extent': extent,
+        'solidity': solidity,
+        'h_lines': len(horizontal_lines),
+        'v_lines': len(vertical_lines),
+        'pattern_score': pattern_score
+    }
+    
+    return confidence, metrics
+
+def update_detection_history(confidence, current_time):
+    """Update detection history and check if detection criteria are met"""
+    global detection_history, detection_start_time, stable_detection, last_print_time
+    
+    # Add current detection to history with timestamp
+    detection_history.append((current_time, confidence >= MIN_CONFIDENCE))
+    
+    # Remove old detections (older than DETECTION_TIME_THRESHOLD)
+    while detection_history and (current_time - detection_history[0][0]) > DETECTION_TIME_THRESHOLD:
+        detection_history.pop(0)
+    
+    # Calculate detection ratio in the time window
+    if detection_history:
+        positive_detections = sum(1 for _, detected in detection_history if detected)
+        detection_ratio = positive_detections / len(detection_history)
+        
+        # Check if we meet the criteria for stable detection
+        if detection_ratio >= MIN_DETECTION_RATIO:
+            if detection_start_time is None:
+                detection_start_time = current_time
+            elif current_time - detection_start_time >= DETECTION_TIME_THRESHOLD:
+                if not stable_detection:
+                    stable_detection = True
+                    if current_time - last_print_time > 1:  # Prevent spam printing
+                        print("Logo Detected")
+                        last_print_time = current_time
+        else:
+            detection_start_time = None
+            stable_detection = False
+    else:
+        detection_start_time = None
+        stable_detection = False
+    
+    return stable_detection
+
+def detect_faces(frame):
+    """Detect faces in the frame"""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = FACE_CASCADE.detectMultiScale(
+        gray,
+        scaleFactor=FACE_SCALE_FACTOR,
+        minNeighbors=FACE_MIN_NEIGHBORS,
+        minSize=MIN_FACE_SIZE
+    )
+    return faces
+
+def draw_hacker_style(frame, contour, confidence, is_detected):
+    """Add hacker-style visual elements to the frame"""
+    height, width = frame.shape[:2]
+    display = frame.copy()
+    
+    # Detect faces
+    faces = detect_faces(frame)
+    
+    # Draw faces first
+    for (x, y, w, h) in faces:
+        # Draw face rectangle
+        cv2.rectangle(display, (x, y), (x+w, y+h), FACE_COLOR, 2)
+        
+        # Draw corner markers
+        corner_len = 15
+        # Top-left
+        cv2.line(display, (x, y), (x + corner_len, y), FACE_COLOR, 2)
+        cv2.line(display, (x, y), (x, y + corner_len), FACE_COLOR, 2)
+        # Top-right
+        cv2.line(display, (x + w, y), (x + w - corner_len, y), FACE_COLOR, 2)
+        cv2.line(display, (x + w, y), (x + w, y + corner_len), FACE_COLOR, 2)
+        # Bottom-left
+        cv2.line(display, (x, y + h), (x + corner_len, y + h), FACE_COLOR, 2)
+        cv2.line(display, (x, y + h), (x, y + h - corner_len), FACE_COLOR, 2)
+        # Bottom-right
+        cv2.line(display, (x + w, y + h), (x + w - corner_len, y + h), FACE_COLOR, 2)
+        cv2.line(display, (x + w, y + h), (x + w, y + h - corner_len), FACE_COLOR, 2)
+        
+        # Add "Friendly Human Detected" text with background
+        text = "Friendly Human Detected"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+        (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, thickness)
+        
+        # Draw text background
+        padding = 5
+        cv2.rectangle(display, 
+                     (x, y - text_height - 2*padding),
+                     (x + text_width + 2*padding, y),
+                     FACE_COLOR, -1)
+        
+        # Draw text
+        cv2.putText(display, text,
+                   (x + padding, y - padding),
+                   font, font_scale, FACE_TEXT_COLOR, thickness, cv2.LINE_AA)
+        
+        # Add tracking data
+        tracking_text = f"Track ID: HUMAN_{x}_{y}"
+        cv2.putText(display, tracking_text,
+                   (x, y + h + 20),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, FACE_TEXT_COLOR, 1, cv2.LINE_AA)
+        
+        # Add dimensions
+        dim_text = f"Size: {w}x{h}"
+        cv2.putText(display, dim_text,
+                   (x, y + h + 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, FACE_TEXT_COLOR, 1, cv2.LINE_AA)
+    
+    # Add scanning effect
+    scan_line_pos = int(abs(np.sin(time.time() * SCAN_LINE_SPEED)) * height)
+    cv2.line(display, (0, scan_line_pos), (width, scan_line_pos), 
+             SCAN_COLOR, 1, cv2.LINE_AA)
+    
+    # Draw border
+    cv2.rectangle(display, (0, 0), (width-1, height-1), 
+                 BORDER_COLOR, BORDER_THICKNESS)
+    
+    # Draw corners
+    def draw_corner(x, y, dx1, dy1, dx2, dy2):
+        cv2.line(display, (x, y), (x + dx1, y), BORDER_COLOR, 2)
+        cv2.line(display, (x, y), (x, y + dy2), BORDER_COLOR, 2)
+    
+    # Draw corners at each corner of the frame
+    draw_corner(0, 0, CORNER_LENGTH, 0, 0, CORNER_LENGTH)  # Top-left
+    draw_corner(width-1, 0, -CORNER_LENGTH, 0, 0, CORNER_LENGTH)  # Top-right
+    draw_corner(0, height-1, CORNER_LENGTH, 0, 0, -CORNER_LENGTH)  # Bottom-left
+    draw_corner(width-1, height-1, -CORNER_LENGTH, 0, 0, -CORNER_LENGTH)  # Bottom-right
+    
+    # Add timestamp and status
+    current_time = datetime.now().strftime("%H:%M:%S.%f")[:-4]
+    cv2.putText(display, f"TIME: {current_time}", (10, 20),
+                cv2.FONT_HERSHEY_SIMPLEX, TEXT_SCALE, TEXT_COLOR, 1, cv2.LINE_AA)
+    
+    # Status indicators
+    status_text = "STATUS: SCANNING..."
+    if len(faces) > 0:
+        status_text = f"STATUS: {len(faces)} HUMAN(S) DETECTED"
+    if is_detected:
+        status_text += " | TARGET ACQUIRED"
+    cv2.putText(display, status_text, (10, height - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, TEXT_SCALE, TEXT_COLOR, 1, cv2.LINE_AA)
+    
+    # Draw confidence meter if confidence > 0
+    if confidence > 0:
+        meter_width = 100
+        meter_height = 10
+        filled_width = int((confidence / 100) * meter_width)
+        cv2.rectangle(display, (width - meter_width - 10, 10),
+                     (width - 10, 10 + meter_height),
+                     BORDER_COLOR, 1)
+        cv2.rectangle(display, (width - meter_width - 10, 10),
+                     (width - meter_width - 10 + filled_width, 10 + meter_height),
+                     BORDER_COLOR, -1)
+        cv2.putText(display, f"CONF: {confidence:.1f}%", 
+                   (width - meter_width - 10, 35),
+                   cv2.FONT_HERSHEY_SIMPLEX, TEXT_SCALE, TEXT_COLOR, 1, cv2.LINE_AA)
+    
+    # Draw target box and analysis markers if contour is detected
+    if contour is not None and confidence > MIN_CONFIDENCE:
+        # Draw the main contour
+        cv2.drawContours(display, [contour], 0, CONTOUR_COLOR, 2)
+        
+        # Get bounding box
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Draw tracking box corners
+        def draw_tracking_corner(corner_x, corner_y, dx1, dy1, dx2, dy2):
+            cv2.line(display, (corner_x, corner_y), 
+                    (corner_x + dx1, corner_y + dy1), 
+                    TRACKING_COLOR, 1, cv2.LINE_AA)
+            cv2.line(display, (corner_x, corner_y), 
+                    (corner_x + dx2, corner_y + dy2), 
+                    TRACKING_COLOR, 1, cv2.LINE_AA)
+        
+        # Draw tracking box at each corner of the bounding rectangle
+        corner_len = 10
+        draw_tracking_corner(x, y, corner_len, 0, 0, corner_len)  # Top-left
+        draw_tracking_corner(x+w, y, -corner_len, 0, 0, corner_len)  # Top-right
+        draw_tracking_corner(x, y+h, corner_len, 0, 0, -corner_len)  # Bottom-left
+        draw_tracking_corner(x+w, y+h, -corner_len, 0, 0, -corner_len)  # Bottom-right
+        
+        # Draw target lines
+        center_x = x + w//2
+        center_y = y + h//2
+        line_length = 10
+        gap = 5
+        
+        # Horizontal target lines
+        cv2.line(display, (center_x - line_length - gap, center_y),
+                (center_x - gap, center_y), TRACKING_COLOR, 1, cv2.LINE_AA)
+        cv2.line(display, (center_x + gap, center_y),
+                (center_x + line_length + gap, center_y), TRACKING_COLOR, 1, cv2.LINE_AA)
+        
+        # Vertical target lines
+        cv2.line(display, (center_x, center_y - line_length - gap),
+                (center_x, center_y - gap), TRACKING_COLOR, 1, cv2.LINE_AA)
+        cv2.line(display, (center_x, center_y + gap),
+                (center_x, center_y + line_length + gap), TRACKING_COLOR, 1, cv2.LINE_AA)
+        
+        # Add dimensions
+        cv2.putText(display, f"{w}x{h}", (x + w + 5, y + h//2),
+                   cv2.FONT_HERSHEY_SIMPLEX, TEXT_SCALE, TEXT_COLOR, 1, cv2.LINE_AA)
+    
+    return display
+
+def detect_boxes(frame):
+    global last_detection_time, box_is_present, last_absence_time, program_start_time, detection_buffer, last_print_time
+    
+    if time.time() - program_start_time < INITIAL_DELAY:
+        return False, None, 0, None
+    
+    # Convert to grayscale and enhance contrast
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.equalizeHist(gray)  # Enhance contrast
+    
+    # Apply adaptive thresholding
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                 cv2.THRESH_BINARY_INV, 11, 2)
+    
+    # Apply morphological operations
+    kernel = np.ones((3,3), np.uint8)
+    black_mask = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    black_mask = cv2.morphologyEx(black_mask, cv2.MORPH_OPEN, kernel)
+    
+    if DEBUG_MODE:
+        cv2.imshow('Black Mask', black_mask)
+        debug_frame = frame.copy()
+    
+    # Find contours with hierarchy to identify nested contours
+    contours, hierarchy = cv2.findContours(black_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    current_time = time.time()
+    max_confidence = 0
+    best_metrics = None
+    best_contour = None
+    
+    # Analyze each contour
+    for i, cnt in enumerate(contours):
+        confidence, metrics = analyze_logo_pattern(cnt, black_mask)
+        
+        if confidence > max_confidence:
+            max_confidence = confidence
+            best_metrics = metrics
+            best_contour = cnt
+    
+    if DEBUG_MODE and best_contour is not None and max_confidence > MIN_CONFIDENCE:
+        cv2.drawContours(debug_frame, [best_contour], 0, (0, 0, 255), 2)
+        if best_metrics:
+            y_pos = 60
+            for key, value in best_metrics.items():
+                text = f"{key}: {value:.2f}"
+                cv2.putText(debug_frame, text, (10, y_pos),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                y_pos += 20
+        cv2.imshow('Debug Detection', debug_frame)
+    
+    # Update detection buffer
+    detection_buffer.append(max_confidence)
+    if len(detection_buffer) > DETECTION_BUFFER_SIZE:
+        detection_buffer.pop(0)
+    
+    # Calculate average confidence over buffer
+    avg_confidence = sum(detection_buffer) / len(detection_buffer)
+    
+    # Update time-based detection history
+    is_stable = update_detection_history(avg_confidence, current_time)
+    
+    # Detection logic
+    if avg_confidence > MIN_CONFIDENCE:
+        if not box_is_present and (current_time - last_absence_time) > min_time:
+            box_is_present = True
+            last_detection_time = current_time
+            countdown_start = current_time
+            return True, None, avg_confidence, best_contour
+        elif box_is_present:
+            return True, None, avg_confidence, best_contour
+    
+    if box_is_present:
+        last_absence_time = current_time
+    box_is_present = False
+    return False, None, avg_confidence, best_contour
+
 # --- Wave Detection Configuration ---
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
+
+# Wave detection parameters
 WAVE_DURATION_THRESHOLD = 1.0  # Seconds required for a wave to be confirmed
 MOVEMENT_THRESHOLD = 0.03      # Minimum horizontal movement range (normalized) to be considered waving
 OPEN_HAND_THRESHOLD = 0.05     # Max distance between finger tips and MCP joints for open hand (normalized)
 HISTORY_LENGTH = 15            # Number of frames to track horizontal movement
 COOLDOWN_PERIOD = 3.0          # Seconds to wait after detecting a wave before detecting again
+
+# Wave detection state variables
+wave_start_time = None
+last_wave_detected_time = 0
+x_history = []
+waving_confirmed = False
+wave_status_text = ""
 
 # Mode configuration
 PLAY_MODE = False       # Flag to track if robot is in play mode
@@ -427,116 +848,6 @@ def close_mouth():
     mouth_position = max(116, mouth_position - mouth_increment)
     return set_mouth_position(mouth_position)
 
-# --- Box Detection Functions ---
-def detect_boxes(frame):
-    global last_detection_time, box_is_present, last_absence_time, mouth_open, mouth_open_time
-    
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    
-    # Create combined brown mask
-    mask1 = cv2.inRange(hsv, LOWER_BROWN1, UPPER_BROWN1)
-    mask2 = cv2.inRange(hsv, LOWER_BROWN2, UPPER_BROWN2)
-    mask3 = cv2.inRange(hsv, LOWER_BROWN3, UPPER_BROWN3)
-    mask4 = cv2.inRange(hsv, LOWER_BROWN4, UPPER_BROWN4)
-    brown_mask = cv2.bitwise_or(cv2.bitwise_or(cv2.bitwise_or(mask1, mask2), mask3), mask4)
-    
-    # Find brown regions
-    contours, _ = cv2.findContours(brown_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    boxes = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < 1000:  # Minimum box area
-            continue
-            
-        # Check if contour is roughly rectangular
-        epsilon = 0.02 * cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, epsilon, True)
-        if len(approx) < 4 or len(approx) > 6:
-            continue
-            
-        # Get rotated rectangle
-        rect = cv2.minAreaRect(cnt)
-        box = cv2.boxPoints(rect)
-        box = box.astype(np.intp)
-        
-        # Check for black logo inside the box
-        if has_black_logo(frame, cnt):
-            boxes.append(box)
-            break  # Stop after first valid detection
-            
-    current_time = time.time()
-    
-    if boxes:
-        if not box_is_present and (current_time - last_absence_time) > min_time:
-            show_event_message("Box Detected!")
-            box_is_present = True
-            last_detection_time = current_time
-            
-            # Open mouth when box is detected (using ROS2)
-            open_mouth()
-            mouth_open = True
-            mouth_open_time = current_time
-            print("Opening mouth")
-            
-            return True, boxes[0], boxes
-        elif box_is_present:
-            # Box is still there but already detected
-            return True, boxes[0], boxes
-        else:
-            # Box is there but cooling down
-            return False, None, boxes
-    else:
-        if box_is_present:
-            # Box just disappeared, update absence time
-            last_absence_time = current_time
-        box_is_present = False
-        return False, None, boxes
-
-def has_black_logo(frame, contour):
-    # Create mask for the current contour
-    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-    cv2.drawContours(mask, [contour], -1, 255, -1)
-    
-    # Get ROI coordinates
-    x, y, w, h = cv2.boundingRect(contour)
-    roi = frame[y:y+h, x:x+w]
-    roi_mask = mask[y:y+h, x:x+w]
-    
-    if roi.size == 0:
-        return False
-    
-    # Detect black pixels in ROI
-    roi_hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    black_mask = cv2.inRange(roi_hsv, (0, 0, 0), (180, 255, BLACK_VALUE_THRESH))
-    black_mask = cv2.bitwise_and(black_mask, roi_mask)
-    
-    # Find black contours
-    black_contours, _ = cv2.findContours(black_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not black_contours:
-        return False
-    
-    # Check if any black region is sufficiently large
-    contour_area = cv2.contourArea(contour)
-    for bc in black_contours:
-        area = cv2.contourArea(bc)
-        if area / contour_area > MIN_LOGO_RATIO:
-            return True
-    
-    return False
-
-# --- Wave Detection Initialization ---
-mp_hands = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
-
-# Wave detection state variables
-wave_start_time = None
-last_wave_detected_time = 0
-x_history = []
-waving_confirmed = False
-wave_status_text = ""
-
 def show_event_message(message):
     """Show an event message for 3 seconds"""
     global current_message
@@ -571,7 +882,7 @@ def draw_message(frame):
 
 def main():
     global wave_start_time, last_wave_detected_time, x_history, waving_confirmed, wave_status_text
-    global PLAY_MODE, mouth_open, mouth_open_time, ros_node, global_frame
+    global PLAY_MODE, mouth_open, mouth_open_time, ros_node, global_frame, program_start_time
     
     # Initialize ROS2 (but continue even if it fails)
     ros_initialized = init_ros()
@@ -634,6 +945,9 @@ def main():
     last_box_status = False
     last_wave_status = False
     
+    # Initialize program start time
+    program_start_time = time.time()
+    
     while True:
         # Process ROS2 callbacks if ROS is initialized
         if ros_node is not None and ros_initialized:
@@ -663,12 +977,17 @@ def main():
             mouth_open = False
         
         # --- Box Detection ---
-        box_present, box, potential_boxes = detect_boxes(frame)
+        box_present, box, confidence, best_contour = detect_boxes(frame)
         
         # Print box status if it changed
         if box_present and not last_box_status:
             print("Box Detected")
             last_box_status = True
+            # Open mouth when box is detected (using ROS2)
+            open_mouth()
+            mouth_open = True
+            mouth_open_time = current_time
+            print("Opening mouth")
         elif not box_present and last_box_status:
             last_box_status = False
         
@@ -811,21 +1130,8 @@ def main():
             if not waving_confirmed:
                 wave_status_text = ""
         
-        # --- Draw Box Detection ---
-        if box_present:
-            # Draw green box around detected package
-            cv2.drawContours(display_frame, [box], 0, (0, 255, 0), 2)
-            box_status_text = "Package for CS Lab Detected"
-        else:
-            box_status_text = "No package detected"
-        
-        # --- Display Status ---
-        cv2.putText(display_frame, box_status_text, (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        
-        if wave_status_text:
-            cv2.putText(display_frame, wave_status_text, (10, 70), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        # Apply hacker-style visualization
+        display_frame = draw_hacker_style(display_frame, best_contour, confidence, box_present)
         
         # Display mouth state and mode
         mode_text = "PLAY MODE" if PLAY_MODE else "NORMAL MODE"

@@ -655,17 +655,37 @@ def main():
     mode_handler_thread.daemon = True
     mode_handler_thread.start()
 
+    command_dict = {
+        "1": lambda: setattr(robot_control.switch_mode_service, 'mode', 'puppy_move'),
+        "2": lambda: setattr(robot_control.switch_mode_service, 'mode', 'play'),
+        "3": lambda: setattr(robot_control.switch_mode_service, 'mode', 'connect'),
+        "4": lambda: setattr(robot_control.switch_mode_service, 'mode', 'panda_move'),
+        "5": lambda: setattr(robot_control.switch_mode_service, 'mode', 'idle')
+    }
 
     atexit.register(robot_control.cleanup)
 
-    try:
-        # Keep the main thread alive
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-    finally:
-        robot_control.cleanup()
+    print("\nMode handler started automatically!")
+    print("Press keys to change modes:")
+    print("1: puppy_move")
+    print("2: play")
+    print("3: connect")
+    print("4: panda_move")
+    print("5: idle")
+    print("'exit' to quit\n")
+
+    while True:
+        try:
+            cmd = input()
+            if cmd in command_dict:
+                command_dict[cmd]()
+                print(f"Switching to mode: {robot_control.switch_mode_service.mode}")
+            elif cmd == "exit":
+                break
+        except Exception as e:
+            robot_control.cleanup()
+            traceback.print_exc()
+            break
 
 
 if __name__ == "__main__":

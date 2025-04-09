@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
@@ -8,33 +6,10 @@ from std_msgs.msg import String
 import time
 # from champ_interfaces.srv import SetMode
 import sys, os
-import argparse
+sys.path.append(os.path.expanduser("~/UnityRos2_ws/src/unity_robotics_demo_msgs"))
+from unity_robotics_demo_msgs.msg import JointState
+from unity_robotics_demo_msgs.srv import UnityAnimateService
 
-# Parse command line arguments
-parser = argparse.ArgumentParser(description='Triceratops Joy Controller')
-args, unknown = parser.parse_known_args()
-
-# Import Unity ROS2 messages
-# Try multiple paths to find unity_robotics_demo_msgs
-possible_paths = [
-    os.path.expanduser("~/UnityRos2_ws/src/unity_robotics_demo_msgs"),
-    os.path.expanduser("~/UnityRos2_ws/install/unity_robotics_demo_msgs/lib/python3.10/site-packages"),
-    "/home/panda2/UnityRos2_ws/src/unity_robotics_demo_msgs",
-    "/home/panda2/UnityRos2_ws/install/unity_robotics_demo_msgs/lib/python3.10/site-packages"
-]
-
-for path in possible_paths:
-    if path not in sys.path and os.path.exists(path):
-        sys.path.append(path)
-        print(f"Added {path} to Python path")
-
-try:
-    from unity_robotics_demo_msgs.msg import JointState
-    from unity_robotics_demo_msgs.srv import UnityAnimateService
-    print("Successfully imported unity_robotics_demo_msgs")
-except ImportError as e:
-    print(f"Error: unity_robotics_demo_msgs is required but not available: {e}")
-    sys.exit(1)
 
 class TriceratopsControlClient(Node):
     def __init__(self):
@@ -42,14 +17,8 @@ class TriceratopsControlClient(Node):
         self.create_subscription(Joy, "joy", self.joy_callback, 1)
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 1)
         self.body_pub = self.create_publisher(String, 'body_pose', 1)
-        
-        # Create Unity service client
-        try:
-            self.cli = self.create_client(UnityAnimateService, 'UnityAnimate_srv')
-            self.req = UnityAnimateService.Request()
-        except Exception as e:
-            print(f"Error: Failed to create Unity service client: {e}")
-            sys.exit(1)
+        self.cli = self.create_client(UnityAnimateService, 'UnityAnimate_srv')
+        self.req = UnityAnimateService.Request()
         
         # Current robot mode (only panda_mode or puppy_mode)
         self.current_mode = "puppy_mode"
@@ -79,39 +48,44 @@ class TriceratopsControlClient(Node):
         if self.button_newly_pressed(data, 12):
             if self.current_mode == "panda_mode":
                 self.current_mode = "puppy_mode"
-                self.call_unity_service("puppy_move")
+                self.req.mode = "puppy_move"
             else:
                 self.current_mode = "panda_mode"
-                self.call_unity_service("panda_move")
+                self.req.mode = "panda_move"
+            self.future = self.cli.call_async(self.req)
             self.get_logger().info(f"Mode: {self.current_mode}")
             time.sleep(0.01)
         
         # Handle other button presses
         elif self.button_newly_pressed(data, 0):
-            if self.get_current_mode() == "idle":
+            if self.req.mode == "idle":
                 if self.previous_mode in ["puppy_move", "panda_move"]:
-                    self.call_unity_service(self.previous_mode)
+                    self.req.mode = self.previous_mode
                 else:
-                    self.call_unity_service("puppy_move" if self.current_mode == "puppy_mode" else "panda_move")
+                    self.req.mode = "puppy_move" if self.current_mode == "puppy_mode" else "panda_move"
             else:
-                self.previous_mode = self.get_current_mode()
-                self.call_unity_service("idle")
-            self.get_logger().info(f"Button: X - Switching to {self.get_current_mode()}")
+                self.previous_mode = self.req.mode
+                self.req.mode = "idle"
+            self.future = self.cli.call_async(self.req)
+            self.get_logger().info(f"Button: X - Switching to {self.req.mode}")
             time.sleep(0.01)
         elif self.button_newly_pressed(data, 1):
-            self.call_unity_service("puppy_move")
+            self.req.mode = "puppy_move"
+            self.future = self.cli.call_async(self.req)
             self.get_logger().info("Button: Circle")
             time.sleep(0.01)
 
         elif self.button_newly_pressed(data, 3):
             self.get_logger().info("Button: Square")
-            self.call_unity_service("panda_move")
+            self.req.mode = "panda_move"
+            self.future = self.cli.call_async(self.req)
             time.sleep(0.01)
         elif self.button_newly_pressed(data, 4):
             self.get_logger().info("Button: Triangle")
             time.sleep(0.01)
         elif self.button_newly_pressed(data, 11):
-            self.call_unity_service("connect")
+            self.req.mode = "connect"
+            self.future = self.cli.call_async(self.req)
             self.get_logger().info("Button: Start (connect)")
             time.sleep(0.01)
         
@@ -158,24 +132,6 @@ class TriceratopsControlClient(Node):
         # Save joystick data for the timer callback
         self.joy = data
 
-    def call_unity_service(self, mode):
-        """Helper method to call the Unity service"""
-        if self.cli is None or self.req is None:
-            print(f"Error: Unity service client not available")
-            return
-        
-        try:
-            self.req.mode = mode
-            self.future = self.cli.call_async(self.req)
-        except Exception as e:
-            self.get_logger().error(f"Failed to call Unity service: {e}")
-    
-    def get_current_mode(self):
-        """Helper method to get the current mode from the Unity request"""
-        if self.req is not None:
-            return self.req.mode
-        return "puppy_move" if self.current_mode == "puppy_mode" else "panda_move"
-
     def button_newly_pressed(self, data, button_index):
         """Check if a button is newly pressed (was not pressed in previous frame)"""
         if button_index not in self.last_button_states:
@@ -216,14 +172,12 @@ class TriceratopsControlClient(Node):
 def main(args=None):
     rclpy.init(args=args)
 
-    try:
-        controller = TriceratopsControlClient()
-        rclpy.spin(controller)
-        controller.destroy_node()
-    except Exception as e:
-        print(f"Error in Joy_controller: {e}")
-    finally:
-        rclpy.shutdown()
+    controller = TriceratopsControlClient()
+
+    rclpy.spin(controller)
+
+    controller.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

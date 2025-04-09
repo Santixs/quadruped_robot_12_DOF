@@ -6,6 +6,13 @@ import subprocess
 import re
 import argparse
 import os
+import socket
+import threading
+import requests
+
+# Add Flask for web streaming
+from flask import Flask, Response, render_template
+import logging
 
 # Add ROS2 imports
 import rclpy
@@ -13,9 +20,13 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
 
+# Set environment variable for headless operation
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='Computer Vision for Triceratops Robot')
 parser.add_argument('--no-gui', action='store_true', help='Disable GUI windows (for running on robot without display)')
+parser.add_argument('--web-port', type=int, default=8080, help='Port for web server (default: 8080)')
 args, unknown = parser.parse_known_args()
 
 # Import Unity ROS2 messages
@@ -23,44 +34,251 @@ import sys
 
 sys.path.append(os.path.expanduser("~/UnityRos2_ws/src/unity_robotics_demo_msgs"))
 
+# --- Web Server Configuration ---
+app = Flask(__name__)
+# Disable Flask's default logging to avoid flooding console
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
+# Global variable for the latest frame
+global_frame = None
+frame_lock = threading.Lock()
+
+# --- Create templates directory and HTML file ---
+os.makedirs('templates', exist_ok=True)
+with open('templates/index.html', 'w') as f:
+    f.write('''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>P.A.N.D.A Vision Console</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+        }
+        .header {
+            background-color: #333333;
+            width: 100%;
+            padding: 15px 0;
+            text-align: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        h1 {
+            margin: 0;
+            color: #00cc66;
+            font-weight: 300;
+            letter-spacing: 2px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 90%;
+            max-width: 1000px;
+        }
+        .video-container {
+            width: 100%;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .status {
+            margin-top: 20px;
+            background-color: #333333;
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        .highlight {
+            color: #00cc66;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>P.A.N.D.A Vision Console</h1>
+    </div>
+    <div class="container">
+        <div class="video-container">
+            <img src="{{ url_for('video_feed') }}" alt="Video Feed">
+        </div>
+        <div class="status">
+            Status: <span class="highlight">Connected</span>
+        </div>
+    </div>
+</body>
+</html>
+''')
+
+def get_ip_address():
+    """Get the primary IP address of the machine"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # doesn't even have to be reachable
+        s.connect(('10.255.255.255', 1))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = '127.0.0.1'
+    finally:
+        s.close()
+    return ip
+
+@app.route('/')
+def index():
+    """Serve the main web page"""
+    return render_template('index.html')
+
+def generate_frames():
+    """Generate frames for the web video stream"""
+    while True:
+        with frame_lock:
+            if global_frame is not None:
+                frame = global_frame.copy()
+            else:
+                # If no frame is available, create a blank frame with a message
+                frame = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(frame, "Waiting for camera...", (50, 240),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        
+        # Encode frame to JPEG
+        ret, buffer = cv2.imencode('.jpg', frame)
+        if not ret:
+            continue
+            
+        # Yield the frame in the HTTP response format
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+        
+        # Small delay to control frame rate
+        time.sleep(0.05)  # ~20 fps
+
+@app.route('/video_feed')
+def video_feed():
+    """Route for the video feed"""
+    return Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+def start_web_server(port):
+    """Start the Flask web server in a separate thread"""
+    ip = get_ip_address()
+    print(f"\n╔════════════════════════════════════════════╗")
+    print(f"║ Web server started!                        ║")
+    print(f"║ Access P.A.N.D.A Vision Console at:        ║")
+    print(f"║ http://{ip}:{port}                  ║")
+    print(f"╚════════════════════════════════════════════╝\n")
+    
+    # Start the Flask app
+    app.run(host='0.0.0.0', port=port, threaded=True)
+
 # --- WiFi Camera Configuration ---
-DEFAULT_STREAM_URL = "http://192.168.41.222/stream"
+DEFAULT_STREAM_URL = "http://192.168.41.116:81/stream"
+
+def set_camera_resolution(ip, resolution="vga"):
+    """Set the camera resolution using the control endpoint"""
+    try:
+        # Map resolution names to ESP32-CAM values
+        resolution_map = {
+            "qvga": 5,  # 320x240
+            "vga": 8,   # 640x480
+            "svga": 9,  # 800x600
+            "xga": 10,  # 1024x768
+            "sxga": 11, # 1280x1024
+            "uxga": 12  # 1600x1200
+        }
+        
+        if resolution not in resolution_map:
+            print(f"Warning: Unknown resolution {resolution}, using VGA")
+            resolution = "vga"
+            
+        # Set the resolution
+        url = f"http://{ip}/control?var=framesize&val={resolution_map[resolution]}"
+        response = requests.get(url, timeout=2.0)  # Add timeout
+        
+        if response.status_code == 200:
+            print(f"Successfully set camera resolution to {resolution.upper()}")
+            # Wait a moment for the camera to adjust
+            time.sleep(1)
+            return True
+        else:
+            print(f"Failed to set camera resolution: {response.status_code}")
+            return False
+            
+    except requests.exceptions.RequestException as e:
+        print(f"Error setting camera resolution: {e}")
+        return False
+    except Exception as e:
+        print(f"Unexpected error setting camera resolution: {e}")
+        return False
+
+def verify_camera_resolution(cap, target_width=640, target_height=480, max_attempts=3):
+    """Verify that the camera is using the correct resolution"""
+    for attempt in range(max_attempts):
+        ret, frame = cap.read()
+        if ret:
+            height, width = frame.shape[:2]
+            if width == target_width and height == target_height:
+                print(f"Verified camera resolution: {width}x{height}")
+                return True
+            else:
+                print(f"Camera resolution mismatch: got {width}x{height}, expected {target_width}x{target_height}")
+                if attempt < max_attempts - 1:
+                    print("Retrying...")
+                    time.sleep(1)
+        else:
+            print("Failed to read frame for resolution verification")
+            if attempt < max_attempts - 1:
+                print("Retrying...")
+                time.sleep(1)
+    return False
 
 def get_camera_ip():
     """
-    Extract camera IP address from the output of 'cat /dev/ttyACM0'
+    Extract camera IP address from the camera_output.txt file
     Returns the camera stream URL if found, otherwise returns the default URL
     """
     try:
-        # Run the command to get the output from the terminal
-        result = subprocess.run(['cat', '/dev/ttyACM0'], 
-                               capture_output=True, 
-                               text=True, 
-                               timeout=2)
+        # Try to read from the camera_output.txt file
+        with open('camera_output.txt', 'r') as f:
+            content = f.read()
         
         # Search for the IP address in the output
         # Pattern looks for: http://192.168.xx.xx
-        match = re.search(r'http://(\d+\.\d+\.\d+\.\d+)', result.stdout)
+        match = re.search(r'http://(\d+\.\d+\.\d+\.\d+)', content)
         
         if match:
             ip_address = match.group(1)
             print(f"Camera IP detected: {ip_address}")
-            return f"http://{ip_address}:81/stream"
+            return ip_address
         else:
             print("No camera IP found in output. Using default URL.")
-            return DEFAULT_STREAM_URL
+            return DEFAULT_STREAM_URL.split('/')[2].split(':')[0]
             
-    except subprocess.TimeoutExpired:
-        # Timeout is expected if no device is connected
-        print("Using default camera URL")
-        return DEFAULT_STREAM_URL
+    except FileNotFoundError:
+        print("Camera output file not found. Using default camera URL")
+        return DEFAULT_STREAM_URL.split('/')[2].split(':')[0]
     except Exception as e:
         # Only show error for unexpected exceptions
         print(f"Error getting camera IP: {e}")
-        return DEFAULT_STREAM_URL
+        return DEFAULT_STREAM_URL.split('/')[2].split(':')[0]
 
-# Get the camera stream URL
-STREAM_URL = get_camera_ip()
+# Get the camera IP and set resolution
+CAMERA_IP = get_camera_ip()
+set_camera_resolution(CAMERA_IP, "vga")  # Set to VGA resolution
+STREAM_URL = f"http://{CAMERA_IP}:81/stream"
 
 # --- Box Detection Configuration ---
 # Brown color ranges for different lighting conditions
@@ -353,23 +571,43 @@ def draw_message(frame):
 
 def main():
     global wave_start_time, last_wave_detected_time, x_history, waving_confirmed, wave_status_text
-    global PLAY_MODE, mouth_open, mouth_open_time, ros_node
+    global PLAY_MODE, mouth_open, mouth_open_time, ros_node, global_frame
     
     # Initialize ROS2 (but continue even if it fails)
     ros_initialized = init_ros()
     
+    # Start web server in a separate thread
+    web_thread = threading.Thread(target=start_web_server, args=(args.web_port,), daemon=True)
+    web_thread.start()
+    
+    # Get the camera IP and set resolution
+    CAMERA_IP = get_camera_ip()
+    print(f"Setting up camera at IP: {CAMERA_IP}")
+    
+    # Set camera resolution to VGA
+    if not set_camera_resolution(CAMERA_IP, "vga"):
+        print("Warning: Could not set camera resolution, continuing with default settings")
+    
     # Initialize WiFi camera connection
+    STREAM_URL = f"http://{CAMERA_IP}:81/stream"
+    print(f"Connecting to stream: {STREAM_URL}")
+    
     cap = cv2.VideoCapture(STREAM_URL)
     if not cap.isOpened():
         print(f"Error: Could not connect to the camera stream at {STREAM_URL}")
         return
     
-    # Set SVGA resolution (800x600)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 600)
+    # Verify the camera resolution
+    if not verify_camera_resolution(cap, 640, 480):
+        print("Warning: Could not verify VGA resolution, continuing with current settings")
     
-    # Optimize camera settings for performance
-    cap.set(cv2.CAP_PROP_FPS, 20)  # Lower target FPS for higher resolution
+    # Get the actual camera resolution
+    original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"Final camera resolution: {original_width}x{original_height}")
+    
+    # Optimize camera settings for the detected resolution
+    cap.set(cv2.CAP_PROP_FPS, 15)  # Reduced FPS for stability
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # Minimize frame buffer for lower latency
     
     print(f"Successfully connected to {STREAM_URL}")
@@ -377,14 +615,19 @@ def main():
     
     # Only create window if GUI is enabled
     if not args.no_gui:
-        cv2.namedWindow('Combined Detection', cv2.WINDOW_NORMAL)
-        cv2.resizeWindow('Combined Detection', 800, 600)
+        try:
+            cv2.namedWindow('Combined Detection', cv2.WINDOW_NORMAL)
+            cv2.resizeWindow('Combined Detection', original_width, original_height)
+        except Exception as e:
+            print(f"Warning: Could not create GUI window: {e}")
+            print("Continuing in headless mode...")
+            args.no_gui = True
     
-    # Initialize hand tracking with balanced settings for SVGA
+    # Initialize hand tracking with optimized settings
     hands = mp_hands.Hands(
-        model_complexity=0,
-        min_detection_confidence=0.6,  # Increased threshold for higher resolution
-        min_tracking_confidence=0.6,
+        model_complexity=1,  # Increased complexity for better detection
+        min_detection_confidence=0.7,  # Higher threshold for reliability
+        min_tracking_confidence=0.7,
         max_num_hands=1)
     
     # Add variables for status tracking
@@ -596,16 +839,25 @@ def main():
         # Draw the event message (if active)
         draw_message(display_frame)
         
+        # Update the global frame for the web server
+        with frame_lock:
+            global_frame = display_frame.copy()
+        
         # Only show the window if GUI is enabled
         if not args.no_gui:
-            # --- Show combined detection results ---
-            cv2.imshow('Combined Detection', display_frame)
-            cv2.resizeWindow('Combined Detection', 800, 600)  # Ensure window stays at SVGA size
-            
-            # --- Exit Condition ---
-            # Slightly increased wait time for higher resolution processing
-            if cv2.waitKey(2) & 0xFF == ord('q'):
-                break
+            try:
+                # --- Show combined detection results ---
+                cv2.imshow('Combined Detection', display_frame)
+                cv2.resizeWindow('Combined Detection', original_width, original_height)  # Maintain original resolution
+                
+                # --- Exit Condition ---
+                # Slightly increased wait time for higher resolution processing
+                if cv2.waitKey(2) & 0xFF == ord('q'):
+                    break
+            except Exception as e:
+                print(f"Warning: GUI operation failed: {e}")
+                print("Continuing in headless mode...")
+                args.no_gui = True
         else:
             # In no-gui mode, we still need a way to exit
             # Check for keyboard input without waiting
@@ -616,7 +868,10 @@ def main():
     hands.close()
     cap.release()
     if not args.no_gui:
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
     
     # Shutdown ROS2
     if ros_node is not None:

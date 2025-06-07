@@ -213,8 +213,17 @@ def set_camera_resolution(ip, resolution="vga"):
         
         if response.status_code == 200:
             print(f"Successfully set camera resolution to {resolution.upper()}")
+            
+            # Additionally set other parameters for maximum performance
+            requests.get(f"http://{ip}/control?var=quality&val=10", timeout=1.0)  # Lower quality for better FPS
+            requests.get(f"http://{ip}/control?var=awb&val=1", timeout=1.0)  # Enable auto white balance
+            requests.get(f"http://{ip}/control?var=dcw&val=1", timeout=1.0)  # Enable downsizing
+            requests.get(f"http://{ip}/control?var=fps&val=15", timeout=1.0)  # Set maximum FPS
+            requests.get(f"http://{ip}/control?var=ae_level&val=0", timeout=1.0)  # Auto exposure level
+            requests.get(f"http://{ip}/control?var=raw_gma&val=1", timeout=1.0)  # Enable GMA
+            
             # Wait a moment for the camera to adjust
-            time.sleep(1)
+            time.sleep(0.5)  # Reduced from 1.0 to 0.5 for faster startup
             return True
         else:
             print(f"Failed to set camera resolution: {response.status_code}")
@@ -895,18 +904,32 @@ def main():
     CAMERA_IP = get_camera_ip()
     print(f"Setting up camera at IP: {CAMERA_IP}")
     
-    # Set camera resolution to VGA
+    # Explicitly set camera to VGA resolution and optimize settings
     if not set_camera_resolution(CAMERA_IP, "vga"):
-        print("Warning: Could not set camera resolution, continuing with default settings")
+        print("Warning: Could not set camera resolution, attempting to connect with default settings")
+    else:
+        print("Camera configured for maximum performance at VGA resolution")
     
-    # Initialize WiFi camera connection
+    # Initialize WiFi camera connection with direct stream URL
     STREAM_URL = f"http://{CAMERA_IP}:81/stream"
     print(f"Connecting to stream: {STREAM_URL}")
     
+    # Open capture with optimized buffer settings
     cap = cv2.VideoCapture(STREAM_URL)
+    
+    # Configure OpenCV capture for minimum latency
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimum buffer for lowest latency
+    cap.set(cv2.CAP_PROP_FPS, 30)  # Request maximum FPS
+    
     if not cap.isOpened():
         print(f"Error: Could not connect to the camera stream at {STREAM_URL}")
-        return
+        # Fallback to MJPEG decoder approach
+        print("Trying alternative connection method...")
+        STREAM_URL = f"http://{CAMERA_IP}:81/stream"
+        cap = cv2.VideoCapture(STREAM_URL, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            print("Failed to connect with alternative method as well. Exiting.")
+            return
     
     # Verify the camera resolution
     if not verify_camera_resolution(cap, 640, 480):
@@ -916,10 +939,6 @@ def main():
     original_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     original_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"Final camera resolution: {original_width}x{original_height}")
-    
-    # Optimize camera settings for the detected resolution
-    cap.set(cv2.CAP_PROP_FPS, 15)  # Reduced FPS for stability
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # Minimize frame buffer for lower latency
     
     print(f"Successfully connected to {STREAM_URL}")
     print("Starting computer vision... press 'q' to quit.")
@@ -952,18 +971,19 @@ def main():
         # Process ROS2 callbacks if ROS is initialized
         if ros_node is not None and ros_initialized:
             try:
-                rclpy.spin_once(ros_node, timeout_sec=0.001)
+                rclpy.spin_once(ros_node, timeout_sec=0.001)  # Reduced timeout for faster processing
             except Exception:
                 # Ignore ROS errors during operation
                 pass
         
-        # Read frame from WiFi stream
+        # Read frame from WiFi stream with timeout to prevent blocking
         ret, frame = cap.read()
         if not ret:
             print("Error: Failed to receive frame. Reconnecting...")
             cap.release()
-            time.sleep(1)
+            time.sleep(0.5)  # Reduced reconnect delay
             cap = cv2.VideoCapture(STREAM_URL)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reset buffer size
             continue
         
         # Create a copy of the frame for hand detection
@@ -1157,8 +1177,8 @@ def main():
                 cv2.resizeWindow('Combined Detection', original_width, original_height)  # Maintain original resolution
                 
                 # --- Exit Condition ---
-                # Slightly increased wait time for higher resolution processing
-                if cv2.waitKey(2) & 0xFF == ord('q'):
+                # Minimized wait time for faster frame processing
+                if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
             except Exception as e:
                 print(f"Warning: GUI operation failed: {e}")

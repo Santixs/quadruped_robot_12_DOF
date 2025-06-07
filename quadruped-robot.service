@@ -1,0 +1,16 @@
+[Unit]
+Description=Quadruped Robot Control Service
+After=network.target
+
+[Service]
+Type=simple
+User=panda2
+Environment="HOME=/home/panda2"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+WorkingDirectory=/home/panda2/code/quadruped_robot_12_DOF-DEV/triceratops_quadruped_robot/triceratops_base
+ExecStart=/home/panda2/code/quadruped_robot_12_DOF-DEV/launch_robot.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target 

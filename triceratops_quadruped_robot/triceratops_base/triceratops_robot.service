@@ -1,0 +1,15 @@
+[Unit]
+Description=Triceratops Robot Launch Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=panda2
+WorkingDirectory=/home/panda2/code/quadruped_robot_12_DOF-DEV/triceratops_quadruped_robot/triceratops_base
+ExecStart=/bin/bash /home/panda2/code/quadruped_robot_12_DOF-DEV/triceratops_quadruped_robot/triceratops_base/launch_robot.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target 

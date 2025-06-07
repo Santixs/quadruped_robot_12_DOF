@@ -1,7 +1,29 @@
-
-
 # triceratops_robot
 
+## **Fork Enhancements**
+
+This fork of the [original quadruped robot project](https://github.com/csl-taipeitech/quadruped_robot_12_DOF/tree/dev) includes several significant improvements:
+
+### **Enhanced Body Movement Control**
+- **Advanced Body Oscillation System**: Custom `Body_controller_panda.py` implements sophisticated trunk movement with synchronized hip (lateral) and back (vertical) oscillations
+- **Dynamic Gait Synchronization**: Body movements are perfectly synchronized with the gait cycle for more natural and stable locomotion
+- **Adaptive Movement Scaling**: Body oscillations automatically scale based on forward speed and turning rate
+- **Smart Balance Control**: Automatic hip bias adjustment when hind legs are in different contact states for improved stability
+
+### ** Computer Vision Integration**
+- **Real-time Camera Monitoring**: `camera_monitor.py` provides continuous camera connection monitoring
+- **Vision-Based Navigation**: Full computer vision pipeline integration with ROS2 launch capabilities
+- **Automatic Camera Discovery**: System automatically detects and connects to available camera devices
+
+### ** System Service Management**
+- **Systemd Service Integration**: `triceratops_robot.service` enables automatic robot startup on boot
+- **Robust Error Handling**: Service includes automatic restart on failure with configurable restart delays
+- **Production-Ready Deployment**: Streamlined deployment for autonomous operation
+
+### ** Advanced Gait Parameter Tuning**
+- **Fine-tuned Gait Parameters**: Optimized timing and movement parameters for improved performance
+- **Configurable Body Dynamics**: Extensive parameter customization for different movement styles
+- **Real-time Parameter Adjustment**: Dynamic parameter scaling based on robot state and commands
 
 ## **How to Run the Files**
 
@@ -99,7 +121,7 @@ contact_phases:
     Maximum vertical lift during the swing phase to clear obstacles.
 
     alpha: 1 (dimensionless)
-    Scaling factor that adjusts the horizontal touchdown offset based on the robot’s speed.
+    Scaling factor that adjusts the horizontal touchdown offset based on the robot's speed.
 
     beta: 0.5 (dimensionless)
     Scaling factor that influences yaw-based adjustments during leg touchdown.
@@ -125,4 +147,82 @@ Additionally, parameters in the BodyController that affect trunk (body) motion i
     Minimum forward speed that triggers full vertical oscillation amplitude.
 
     twist_linear_scale & twist_angular_scale: 0.2 (each, dimensionless)
-    Scale factors that moderate the influence of commanded linear and angular velocities on the trunk’s oscillatory behavior.
+    Scale factors that moderate the influence of commanded linear and angular velocities on the trunk's oscillatory behavior.
+
+---
+
+## **Enhanced Body Movement System**
+
+The custom `Body_controller_panda.py` implements an advanced body movement system that significantly improves the robot's natural locomotion:
+
+### **Body Oscillation Mechanics**
+
+#### **Hip (Lateral) Movement**
+```python
+hip_offset = base_yaw_amplitude * sin(2π * phase_ratio + phase_shift)
+```
+- **Straight Movement**: Clean sine wave oscillation with 0.005m base amplitude
+- **Turning Movement**: Phase shift proportional to turning rate for natural turning dynamics
+- **Contact-Based Bias**: Automatic 0.005m hip shift when hind legs have different contact states
+  - Rear Right off + Rear Left on → Hip shifts right (negative bias)
+  - Rear Left off + Rear Right on → Hip shifts left (positive bias)
+
+#### **Back (Vertical) Movement**
+```python
+back_offset = vertical_amplitude * cos(2π * phase_ratio)
+```
+- **Speed-Scaled Amplitude**: Vertical oscillation scales with forward speed (base: 0.01m)
+- **90° Phase Offset**: Cosine function creates natural 90° phase difference from hip movement
+- **Stationary Damping**: 50% amplitude reduction when robot is nearly stationary
+
+### **Technical Parameters**
+- **base_yaw_amplitude**: 0.005m (reduced from original for smoother movement)
+- **base_vertical_amplitude**: 0.01m (optimized for natural gait)
+- **hip_bias_amplitude**: 0.005m (balance correction amplitude)
+- **twist_linear_scale**: 0.1 (20% reduction for stability)
+- **twist_angular_scale**: 0.1 (20% reduction for controlled turning)
+- **straight_threshold**: 0.05 rad/s (turning detection threshold)
+- **linear_threshold**: 0.05 m/s (significant movement threshold)
+
+---
+
+## **Computer Vision System (Fork Addition)**
+
+### **Camera Monitoring**
+The `camera_monitor.py` script provides robust camera integration:
+
+- **Device Monitoring**: Continuous monitoring of `/dev/ttyACM1` for camera connections
+- **Automatic URL Detection**: Regex-based detection of camera streaming URLs
+- **Real-time Output**: Live camera data written to `camera_output.txt`
+- **Error Recovery**: Graceful handling of device disconnections and timeouts
+
+### **Vision Integration Command**
+```bash
+ros2 launch triceratops_quadruped_robot launch_vision_integration.py
+```
+
+---
+
+## **Service Management (Fork Addition)**
+
+### **Systemd Service Setup**
+The included `triceratops_robot.service` enables production deployment:
+
+```bash
+# Install the service
+sudo cp triceratops_robot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable triceratops_robot.service
+
+# Control the service
+sudo systemctl start triceratops_robot.service
+sudo systemctl status triceratops_robot.service
+```
+
+**Service Features:**
+- **Auto-start on boot**: Automatic robot startup after system boot
+- **Failure recovery**: 10-second restart delay on service failure
+- **User isolation**: Runs under dedicated `panda2` user account
+- **Network dependency**: Waits for network availability before starting
+
+---
